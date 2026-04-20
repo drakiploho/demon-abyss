@@ -231,6 +231,40 @@ def add_to_portfolio(symbol: str, price: float, amount: float) -> str:
     save_portfolio(p)
     avg = p[symbol]["total_cost"] / p[symbol]["amount"]
     return f"✅ {symbol} x{amount:.4f} по ${price:.4f}\nСредняя: ${avg:.4f}"
+def remove_from_portfolio(symbol: str, price: float, amount: float) -> str:
+    p = load_portfolio()
+    symbol_upper = symbol.upper()
+    
+    # Пробуем найти точное совпадение
+    if symbol_upper not in p:
+        # Ищем частичное совпадение (например, SOL вместо SOLUSDT)
+        for key in p.keys():
+            if key.upper().startswith(symbol_upper):
+                symbol_upper = key
+                break
+        else:
+            return f"❌ Монета **{symbol}** не найдена в портфеле."
+    
+    data = p[symbol_upper]
+    current_amount = data["amount"]
+    
+    if amount > current_amount:
+        return f"❌ Недостаточно монет. В портфеле **{current_amount:.4f}** {symbol_upper}, а ты хочешь продать **{amount:.4f}**."
+    
+    # Уменьшаем количество
+    new_amount = current_amount - amount
+    
+    if new_amount < 0.00001:  # Почти ноль — удаляем монету
+        del p[symbol_upper]
+        save_portfolio(p)
+        return f"✅ Продано: **{symbol_upper}** x{amount:.4f} по ${price:.4f}. Монета удалена из портфеля."
+    else:
+        # Пропорционально уменьшаем общую стоимость
+        avg_cost = data["total_cost"] / current_amount
+        data["amount"] = new_amount
+        data["total_cost"] = new_amount * avg_cost
+        save_portfolio(p)
+        return f"✅ Продано: **{symbol_upper}** x{amount:.4f} по ${price:.4f}\nОсталось: **{new_amount:.4f}** шт\nСредняя: **${avg_cost:.4f}**"
 
 def get_portfolio_summary() -> str:
     p = load_portfolio()
@@ -622,14 +656,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SILENT_MODE = not SILENT_MODE; settings["SILENT_MODE"] = SILENT_MODE; save_settings(settings)
             await update.message.reply_text(f"🔇 Тихий режим: {'ВКЛ' if SILENT_MODE else 'ВЫКЛ'}")
         elif text == "🔙 НАЗАД": await update.message.reply_text("Главное меню", reply_markup=MAIN_KEYBOARD)
-        elif text.lower().startswith("купил"):
+        elif text.lower().startswith("купил") or text.lower().startswith("продал"):
             parts = text.split()
             if len(parts) >= 4:
+                action = parts[0].lower()
+                symbol = parts[1].upper()
                 try:
-                    res = add_to_portfolio(parts[1].upper(), float(parts[2]), float(parts[3]))
+                    price = float(parts[2])
+                    amount = float(parts[3])
+                    if action == "купил":
+                        res = add_to_portfolio(symbol, price, amount)
+                    else:  # продал
+                        res = remove_from_portfolio(symbol, price, amount)
                     await update.message.reply_text(res, parse_mode=ParseMode.MARKDOWN)
-                except: await update.message.reply_text("❌ Неверный формат. Пример: `купил BTCUSDT 78000 0.01`")
-            else: await update.message.reply_text("❌ Пример: `купил BTCUSDT 78000 0.01`")
+                except ValueError:
+                    await update.message.reply_text("❌ Неверный формат. Пример: `купил BTCUSDT 78000 0.01` или `продал BTCUSDT 79000 0.01`")
+            else:
+                await update.message.reply_text("❌ Пример: `купил BTCUSDT 78000 0.01` или `продал BTCUSDT 79000 0.01`")
         elif context.user_data.get("waiting_for_chart"):
             symbol = text.strip().upper()
             if not symbol.endswith("USDT"): symbol += "USDT"
