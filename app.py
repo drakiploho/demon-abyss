@@ -38,7 +38,6 @@ except ImportError as e:
     os.system(f"{sys.executable} -m pip install pandas ta pybit python-telegram-bot pytz requests matplotlib")
     sys.exit(0)
 
-# ========== УВЕДОМЛЕНИЯ ОБ ОШИБКАХ ==========
 async def notify_error(context: ContextTypes.DEFAULT_TYPE, error_msg: str):
     try:
         if TELEGRAM_CHAT_ID:
@@ -663,25 +662,41 @@ async def signal_search(update: Update, context: ContextTypes.DEFAULT_TYPE, fast
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, WEEKLY_STATS
-    q = update.callback_query; await q.answer(); d = q.data
+    q = update.callback_query
+    await q.answer()
+    d = q.data
     if d.startswith("score_"):
-        MIN_SCORE = int(d.split("_")[1]); settings["MIN_SCORE"] = MIN_SCORE; save_settings(settings)
+        MIN_SCORE = int(d.split("_")[1])
+        settings["MIN_SCORE"] = MIN_SCORE
+        save_settings(settings)
         await q.edit_message_text(f"✅ Строгость: {MIN_SCORE}")
     elif d.startswith("explain_"):
         sid = d.split("_", 1)[1]
-        if sid in ACTIVE_SIGNALS: await q.message.reply_text(generate_explanation(ACTIVE_SIGNALS[sid]), parse_mode=ParseMode.MARKDOWN)
+        if sid in ACTIVE_SIGNALS:
+            await q.message.reply_text(generate_explanation(ACTIVE_SIGNALS[sid]), parse_mode=ParseMode.MARKDOWN)
     elif d.startswith("tp_") or d.startswith("sl_"):
         act, sid = d.split("_", 1)
         if sid in ACTIVE_SIGNALS:
             s = ACTIVE_SIGNALS[sid]
-            pnl = abs(s["tp"]-s["price"])/s["price"]*100 if act=="tp" else -abs(s["sl"]-s["price"])/s["price"]*100
-            CLOSED_SIGNALS.append({"symbol": s["symbol"], "result": "tp" if act=="tp" else "sl", "pnl": pnl, "time": datetime.now()})
-            if len(CLOSED_SIGNALS) > 10: CLOSED_SIGNALS.pop(0)
+            if act == "tp":
+                pnl = abs(s["tp"] - s["price"]) / s["price"] * 100
+            else:
+                pnl = -abs(s["sl"] - s["price"]) / s["price"] * 100
+            CLOSED_SIGNALS.append({
+                "symbol": s["symbol"],
+                "result": "tp" if act == "tp" else "sl",
+                "pnl": pnl,
+                "time": datetime.now()
+            })
+            if len(CLOSED_SIGNALS) > 10:
+                CLOSED_SIGNALS.pop(0)
             del ACTIVE_SIGNALS[sid]
             WEEKLY_STATS["user_trades"] += 1
-            if pnl > 0: WEEKLY_STATS["user_wins"] += 1
+            if pnl > 0:
+                WEEKLY_STATS["user_wins"] += 1
             WEEKLY_STATS["user_pnl"] += pnl
-            await q.edit_message_text(f"{q.message.text}\n\n{'✅' if act=='tp' else '❌'} Закрыто! P&L: {pnl:+.2f}%")
+            emoji = "✅" if act == "tp" else "❌"
+            await q.edit_message_text(f"{q.message.text}\n\n{emoji} Закрыто! P&L: {pnl:+.2f}%")
 
 def main():
     print("\n" + "="*60)
