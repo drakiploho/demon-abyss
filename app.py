@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v26.3 WHISPER (Без портфеля)
-Графики с EMA/объёмом, скальпинг, уведомления об ошибках.
+TradeSight Pro v27.0 WHISPER (Две стратегии)
++ Пробой тренда (Trend Following)
++ Отскок от Бездны (Mean Reversion)
 """
 
 import asyncio
@@ -78,7 +79,6 @@ PHRASES = {
     "market_neutral": ["😴 Рынок замер. Даже мои алгоритмы засыпают.", "⏳ Боковик. Время учиться."],
     "idle_thoughts": ["🤔 Смотрю на график BTC... Красиво.", "💭 Интересно, почему люди боятся красных свечей?"],
     "signal_found_buy": ["🔥 Огонь! Нашёл точку для покупки.", "🟢 Зелёный свет! Можно входить."],
-    "signal_found_sell": ["💀 Кровь! Нашёл точку для продажи.", "🔴 Красный сигнал! Можно шортить."],
     "signal_fail": ["🌫️ Видения туманны... Сигналов нет.", "😴 Рынок спит. Сигналов нет."],
     "prediction_success": ["✅ Моё видение сбылось!", "🎯 В яблочко!"],
     "prediction_fail": ["❌ Видение не сбылось. Рынок хаотичен.", "🌫️ Бездна ошиблась. Прости, смертный."],
@@ -300,6 +300,9 @@ def calculate_indicators(df):
     df["volume_ma"] = df["volume"].rolling(20).mean()
     df["volume_ratio"] = df["volume"] / df["volume_ma"]
     macd = ta.trend.MACD(df["close"]); df["macd"] = macd.macd(); df["macd_signal"] = macd.macd_signal()
+    bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2)
+    df["bb_lower"] = bb.bollinger_lband()
+    df["bb_upper"] = bb.bollinger_hband()
     return df
 
 def generate_chart(symbol: str) -> Optional[io.BytesIO]:
@@ -344,45 +347,70 @@ def detect_candle_pattern(df: pd.DataFrame) -> str:
         p = CANDLE_PATTERNS[key]; return f"\n🕯️ **{p['name']}**\n📖 {p['desc']}\n🎯 {p['action']}"
     return ""
 
-def analyze_symbol(symbol, direction="BUY", interval="5", fast_mode=False):
+def analyze_symbol(symbol, interval="5", fast_mode=False):
     df = get_klines(symbol, interval, 100 if fast_mode else 200)
     if df is None or len(df) < 30: return None
-    df = calculate_indicators(df); last, prev = df.iloc[-1], df.iloc[-2]
+    df = calculate_indicators(df)
+    last, prev = df.iloc[-1], df.iloc[-2]
     price, atr = last["close"], last["atr"]
     vol_thresh = 1.1 if fast_mode else 1.3
     if last["volume_ratio"] < vol_thresh: return None
-    if direction == "BUY":
-        if (last["ema20"] > last["ema50"] and last["close"] > prev["high"] * 1.001 and 50 < last["rsi"] < (80 if fast_mode else 75) and last["macd"] > last["macd_signal"]):
-            sl, tp = price - atr * (1.2 if fast_mode else 1.5), price + atr * (1.5 if fast_mode else 2.5)
-        else: return None
-    else:
-        if (last["ema20"] < last["ema50"] and last["close"] < prev["low"] * 0.999 and (20 if fast_mode else 25) < last["rsi"] < 50 and last["macd"] < last["macd_signal"]):
-            sl, tp = price + atr * (1.2 if fast_mode else 1.5), price - atr * (1.5 if fast_mode else 2.5)
-        else: return None
-    score = 50
-    if (direction == "BUY" and last["rsi"] > 55) or (direction == "SELL" and last["rsi"] < 45): score += 15
+    signal_info = None
+    strategy_name = ""
+    strategy_desc = ""
+    if (last["ema20"] > last["ema50"] and last["close"] > prev["high"] * 1.001 and 
+        50 < last["rsi"] < (80 if fast_mode else 75) and last["macd"] > last["macd_signal"]):
+        sl = price - atr * (1.2 if fast_mode else 1.5)
+        tp = price + atr * (1.5 if fast_mode else 2.5)
+        score = 60
+        strategy_name = "ПРОБОЙ ТРЕНДА"
+        strategy_desc = "Рынок в движении. Цена пробила максимум, как спортсмен — рекорд."
+        signal_info = (sl, tp, score, strategy_name, strategy_desc)
+    elif (last["close"] <= last["bb_lower"] and last["rsi"] < 45 and 
+          last["volume_ratio"] > 1.2 and not (last["ema20"] > last["ema50"])):
+        sl = price - atr * 1.0
+        tp = price + atr * 1.5
+        score = 55
+        strategy_name = "ОТСКОК ОТ БЕЗДНЫ"
+        strategy_desc = "Рынок в боковике. Цена у нижней границы, ждём отскок вверх."
+        signal_info = (sl, tp, score, strategy_name, strategy_desc)
+    if not signal_info: return None
+    sl, tp, base_score, strat_name, strat_desc = signal_info
+    score = base_score
+    if last["rsi"] > 55 and strat_name == "ПРОБОЙ ТРЕНДА": score += 15
+    if last["rsi"] < 40 and strat_name == "ОТСКОК ОТ БЕЗДНЫ": score += 15
     if last["volume_ratio"] > 1.8: score += 15
     min_score = 50 if fast_mode else MIN_SCORE
     if score < min_score: return None
     rr = abs(tp - price) / abs(price - sl) if abs(price - sl) > 0 else 0
     btc_corr = get_btc_correlation(symbol)
     pattern = detect_candle_pattern(df)
-    return {"symbol": symbol, "signal": direction, "price": price, "tp": tp, "sl": sl, "score": score, "rsi": last["rsi"], "volume_ratio": last["volume_ratio"], "rr": rr, "time": datetime.now(), "atr": atr, "btc_corr": btc_corr, "pattern": pattern}
+    return {
+        "symbol": symbol, "signal": "BUY", "price": price, "tp": tp, "sl": sl,
+        "score": score, "rsi": last["rsi"], "volume_ratio": last["volume_ratio"],
+        "rr": rr, "time": datetime.now(), "atr": atr, "btc_corr": btc_corr, "pattern": pattern,
+        "strategy": strat_name, "strategy_desc": strat_desc
+    }
 
 def format_signal(s):
     stars = "🔥" * min(5, int(s["score"] / 20) + 1)
     corr_line = f"\n📈 Корр. с BTC: {s.get('btc_corr', 0):.2f}" if s.get('btc_corr', 0) > 0.5 else ""
-    action = "ПОКУПАТЬ" if s["signal"] == "BUY" else "ПРОДАВАТЬ"
-    em = "🟢" if s["signal"] == "BUY" else "🔴"
+    if s.get("strategy") == "ПРОБОЙ ТРЕНДА":
+        strat_emoji = "🟢🟢🟢"
+    else:
+        strat_emoji = "🟡🟡🟡"
     personality = "\n💚 *О, мой старый знакомый!*" if s['symbol'] in FAVORITE_COINS else ("\n💔 *Этот актив вечно меня обманывает.*" if s['symbol'] in HATED_COINS else "")
-    phrase = get_phrase("signal_found_buy") if s["signal"] == "BUY" else get_phrase("signal_found_sell")
+    phrase = get_phrase("signal_found_buy")
     return f"""
-{em} {em} {em} [ СИГНАЛ: {action} ] {em} {em} {em}
+{strat_emoji} [ СТРАТЕГИЯ: {s['strategy']} ] {strat_emoji}
+**Рынок:** {s['strategy_desc']}
+**Сигнал:** ПОКУПАТЬ {escape_markdown(s['symbol'])} {stars} Score: {s['score']:.0f}/100
 {phrase}
-🔮 {escape_markdown(s['symbol'])} {stars} Score: {s['score']:.0f}/100
+
 💵 ВХОД: {s['price']:.6f}
 🎯 ЦЕЛЬ: {s['tp']:.6f}
 🛑 СТОП: {s['sl']:.6f}
+
 📊 RSI: {s['rsi']:.1f} | Объём: x{s['volume_ratio']:.2f}
 ⚖️ Риск/Прибыль: 1:{s['rr']:.2f}{corr_line}{personality}{s.get('pattern', '')}
 ⏰ {s['time'].strftime('%H:%M:%S')}
@@ -390,14 +418,14 @@ def format_signal(s):
 
 def generate_explanation(s):
     reasons = []
-    if s["signal"] == "BUY":
-        if s["volume_ratio"] > 1.8: reasons.append("🔥 Объём высокий.")
-        reasons.append("📈 Тренд восходящий.")
-        if 50 < s["rsi"] < 70: reasons.append(f"💪 RSI={s['rsi']:.0f} — не перегрет.")
+    if s["strategy"] == "ПРОБОЙ ТРЕНДА":
+        if s["volume_ratio"] > 1.8: reasons.append("🔥 Объём высокий — рынок активен.")
+        reasons.append("📈 Тренд восходящий — покупатели сильнее.")
+        if 50 < s["rsi"] < 70: reasons.append(f"💪 RSI={s['rsi']:.0f} — монета не перегрета.")
     else:
-        if s["volume_ratio"] > 1.8: reasons.append("🔥 Объём высокий.")
-        reasons.append("📉 Тренд нисходящий.")
-        if 30 < s["rsi"] < 50: reasons.append(f"💪 RSI={s['rsi']:.0f} — не перепродан.")
+        reasons.append("📊 Рынок в боковике, цена у нижней границы.")
+        if s["rsi"] < 45: reasons.append(f"💪 RSI={s['rsi']:.0f} — монета перепродана, ждём отскок.")
+        if s["volume_ratio"] > 1.2: reasons.append("📈 Объём подтверждает интерес.")
     return f"📘 **ОБЪЯСНЕНИЕ**\n\n{chr(10).join(f'• {r}' for r in reasons)}\n\n🎯 Цель = {s['tp']:.6f}\n🛑 Стоп = {s['sl']:.6f}"
 
 def get_market_summary():
@@ -419,16 +447,20 @@ async def auto_scan_loop(context):
     while AUTO_SCAN:
         await asyncio.sleep(300)
         if SILENT_MODE or is_sleep_time(): continue
-        for direction in ["BUY", "SELL"]:
-            for sym in get_top_symbols(10):
-                s = analyze_symbol(sym, direction)
-                if s:
-                    key = f"{sym}-{direction}"
-                    if key in SENT_SIGNALS and datetime.now() - SENT_SIGNALS[key] < timedelta(hours=2): continue
-                    SENT_SIGNALS[key] = datetime.now(); LAST_SIGNAL_TIME = datetime.now()
-                    try: await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=format_signal(s), parse_mode=ParseMode.MARKDOWN)
-                    except Exception as e: await notify_error(context, f"Ошибка отправки сигнала: {e}")
-                    break
+        signals = []
+        for sym in get_top_symbols(15):
+            s = analyze_symbol(sym)
+            if s:
+                key = f"{sym}-BUY"
+                if key in SENT_SIGNALS and datetime.now() - SENT_SIGNALS[key] < timedelta(hours=2): continue
+                SENT_SIGNALS[key] = datetime.now()
+                signals.append(s)
+                if len(signals) >= 3: break
+        if signals:
+            LAST_SIGNAL_TIME = datetime.now()
+            for s in signals:
+                try: await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=format_signal(s), parse_mode=ParseMode.MARKDOWN)
+                except Exception as e: await notify_error(context, f"Ошибка отправки сигнала: {e}")
 
 async def emergency_check(context):
     global MARKET_CRASH_NOTIFIED, MARKET_PUMP_NOTIFIED
@@ -458,15 +490,19 @@ async def full_summary_loop(context):
         if now.hour % 4 != 0 or now.minute != 0: continue
         try:
             market, clusters, dxy, oi, news = get_market_summary(), get_cluster_analysis(), get_dxy(), get_open_interest(), get_news()
-            best_buy = best_sell = None
-            for sym in get_top_symbols(10):
-                if not best_buy: best_buy = analyze_symbol(sym, "BUY")
-                if not best_sell: best_sell = analyze_symbol(sym, "SELL")
-                if best_buy and best_sell: break
+            signals = []
+            for sym in get_top_symbols(15):
+                s = analyze_symbol(sym)
+                if s:
+                    signals.append(s)
+                    if len(signals) >= 3: break
             report = f"📊 **АВТО-СВОДКА** ({now.strftime('%H:%M')})\n\n{market}\n\n{clusters if clusters else ''}\n{dxy if dxy else ''}\n{oi if oi else ''}\n\n{news if news else ''}\n"
-            if best_buy: report += f"\n🟢 **BUY:** {best_buy['symbol']} | {best_buy['price']:.4f} → {best_buy['tp']:.4f}\n"
-            if best_sell: report += f"\n🔴 **SELL:** {best_sell['symbol']} | {best_sell['price']:.4f} → {best_sell['tp']:.4f}\n"
-            if not best_buy and not best_sell: report += f"\n{get_phrase('signal_fail')}"
+            if signals:
+                report += f"\n🟢 **ТОП-{len(signals)} СИГНАЛОВ:**\n"
+                for s in signals:
+                    report += f"• {s['symbol']} | {s['strategy']} | Score {s['score']:.0f} | ${s['price']:.4f} → ${s['tp']:.4f}\n"
+            else:
+                report += f"\n{get_phrase('signal_fail')}"
             await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=report, parse_mode=ParseMode.MARKDOWN)
         except Exception as e: await notify_error(context, f"full_summary_loop: {e}")
 
@@ -521,8 +557,7 @@ async def stop_reminder(context):
         if dist < 0.5 and not s.get("stop_warned"):
             s["stop_warned"] = True
             await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"⚠️ {s['symbol']} в {dist:.2f}% от стопа!")
-        if s["signal"] == "BUY": progress = (cur - s["price"]) / (s["tp"] - s["price"]) if s["tp"] != s["price"] else 0
-        else: progress = (s["price"] - cur) / (s["price"] - s["tp"]) if s["price"] != s["tp"] else 0
+        progress = (cur - s["price"]) / (s["tp"] - s["price"]) if s["tp"] != s["price"] else 0
         if progress >= 0.5 and not s.get("partial_advised"):
             s["partial_advised"] = True
             await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"✂️ **ЧАСТИЧНАЯ ФИКСАЦИЯ**\n{s['symbol']} прошёл 50% до цели.\n💡 Закрой 30-50% позиции, остальное переведи в безубыток.")
@@ -533,7 +568,7 @@ async def stop_reminder(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v26.3\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v27.0\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -546,14 +581,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text == "📊 СВОДКА":
             msg = await update.message.reply_text("📊 Формирую...")
             market, clusters, dxy, oi, news = get_market_summary(), get_cluster_analysis(), get_dxy(), get_open_interest(), get_news()
-            best_buy = best_sell = None
-            for sym in get_top_symbols(10):
-                if not best_buy: best_buy = analyze_symbol(sym, "BUY")
-                if not best_sell: best_sell = analyze_symbol(sym, "SELL")
-                if best_buy and best_sell: break
+            signals = []
+            for sym in get_top_symbols(15):
+                s = analyze_symbol(sym)
+                if s:
+                    signals.append(s)
+                    if len(signals) >= 3: break
             report = f"📊 **СВОДКА**\n\n{market}\n\n{clusters if clusters else ''}\n{dxy if dxy else ''}\n{oi if oi else ''}\n\n{news if news else ''}\n"
-            if best_buy: report += f"\n🟢 **BUY:** {best_buy['symbol']} | {best_buy['price']:.4f} → {best_buy['tp']:.4f}\n"
-            if best_sell: report += f"\n🔴 **SELL:** {best_sell['symbol']} | {best_sell['price']:.4f} → {best_sell['tp']:.4f}\n"
+            if signals:
+                report += f"\n🟢 **ТОП-{len(signals)} СИГНАЛОВ:**\n"
+                for s in signals:
+                    report += f"• {s['symbol']} | {s['strategy']} | Score {s['score']:.0f} | ${s['price']:.4f} → ${s['tp']:.4f}\n"
             await msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
         elif text == "🔥 СИГНАЛЫ": await signal_search(update, context, fast=False)
         elif text == "⚡ СКАЛЬП": await signal_search(update, context, fast=True)
@@ -569,7 +607,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         resp = session.get_tickers(category="spot", symbol=s["symbol"])
                         cur = float(resp["result"]["list"][0]["lastPrice"]) if resp.get("retCode") == 0 else s["price"]
                     except: cur = s["price"]
-                    pnl = ((cur - s["price"]) / s["price"] * 100) if s["signal"] == "BUY" else ((s["price"] - cur) / s["price"] * 100)
+                    pnl = ((cur - s["price"]) / s["price"] * 100)
                     msg += f"{'🟢' if pnl > 0 else '🔴'} {s['symbol']} | P&L: {pnl:+.2f}%\n"
                 await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
         elif text == "📚 ОБУЧЕНИЕ":
@@ -606,15 +644,13 @@ async def signal_search(update: Update, context: ContextTypes.DEFAULT_TYPE, fast
     mode = "⚡ СКАЛЬП" if fast else "🔥 СИГНАЛЫ"
     msg = await update.message.reply_text(f"🔮 Ищу {mode}...")
     signals = []; interval = "1" if fast else "5"
-    for d in ["BUY", "SELL"]:
-        for sym in get_top_symbols(15):
-            s = analyze_symbol(sym, d, interval, fast_mode=fast)
-            if s:
-                key = f"{sym}-{d}-{interval}"
-                if key in SENT_SIGNALS and datetime.now() - SENT_SIGNALS[key] < timedelta(minutes=30 if fast else 120): continue
-                SENT_SIGNALS[key] = datetime.now(); signals.append(s)
-                if len(signals) >= 3: break
-        if len(signals) >= 3: break
+    for sym in get_top_symbols(20):
+        s = analyze_symbol(sym, interval, fast_mode=fast)
+        if s:
+            key = f"{sym}-BUY-{interval}"
+            if key in SENT_SIGNALS and datetime.now() - SENT_SIGNALS[key] < timedelta(minutes=30 if fast else 120): continue
+            SENT_SIGNALS[key] = datetime.now(); signals.append(s)
+            if len(signals) >= 3: break
     if not signals:
         await msg.edit_text(f"{get_phrase('signal_fail')}\n🌫️ Нет сигналов ({mode})"); return
     await msg.edit_text(f"🔮 Найдено: {len(signals)}")
@@ -649,7 +685,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v26.3 (Без портфеля)")
+    print("🌙 TradeSight Pro WHISPER v27.0 (Две стратегии)")
     print("="*60)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -664,7 +700,7 @@ def main():
     app.job_queue.run_repeating(check_predictions, interval=900, first=180)
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
-    print("🌙 Демон без портфеля запущен.")
+    print("🌙 Демон с двумя стратегиями запущен.")
     app.run_polling()
 
 if __name__ == "__main__":
