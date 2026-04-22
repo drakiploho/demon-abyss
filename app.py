@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v27.2 WHISPER (Аналитик)
-+ Расширенная сводка с монетами-лидерами
-+ Свечной паттерн BTC
-+ Активные прогнозы в сводке
-+ Оптимизированные интервалы фоновых задач
+TradeSight Pro v27.3 WHISPER (Аналитик)
++ Возвращена кнопка СТАТ ПРОГНОЗОВ
++ Отчёты о прогнозах приходят всегда (даже в тихом режиме)
++ Ускорена проверка прогнозов (каждые 15 минут)
 """
 
 import asyncio
@@ -180,7 +179,7 @@ def get_btc_correlation(symbol: str) -> float:
     except: return 0.0
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup([["📊 СВОДКА", "🔥 СИГНАЛЫ"], ["⏳ АКТИВНЫЕ", "📚 ОБУЧЕНИЕ"], ["📈 ГРАФИК", "⚡ СКАЛЬП"], ["⚙️ ЕЩЁ"]], resize_keyboard=True)
-MORE_KEYBOARD = ReplyKeyboardMarkup([["📰 НОВОСТИ", "🌫️ ИСТОРИЯ"], ["⚙️ СТРОГОСТЬ", "🔇 ТИХО"], ["🔙 НАЗАД"]], resize_keyboard=True)
+MORE_KEYBOARD = ReplyKeyboardMarkup([["📰 НОВОСТИ", "🌫️ ИСТОРИЯ"], ["🧠 СТАТ ПРОГНОЗОВ", "⚙️ СТРОГОСТЬ"], ["🔇 ТИХО", "🔙 НАЗАД"]], resize_keyboard=True)
 
 def load_predictions(): return json.load(open(PREDICTIONS_FILE, 'r')) if PREDICTIONS_FILE.exists() else []
 def save_predictions(p): json.dump(p, open(PREDICTIONS_FILE, 'w'), indent=2)
@@ -214,12 +213,28 @@ async def check_predictions(context: ContextTypes.DEFAULT_TYPE):
         else:
             stats["failed"] += 1
             if p['symbol'] not in HATED_COINS: HATED_COINS.append(p['symbol'])
-        if not SILENT_MODE:
-            phrase = get_phrase("prediction_success") if success else get_phrase("prediction_fail")
-            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"{phrase}\n{p['symbol']}: ${p['start_price']:.4f} → ${cur:.4f}")
+        # Отправляем отчёт ВСЕГДА, независимо от SILENT_MODE
+        phrase = get_phrase("prediction_success") if success else get_phrase("prediction_fail")
+        await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"{phrase}\n{p['symbol']}: ${p['start_price']:.4f} → ${cur:.4f}")
     if updated:
         save_predictions(preds); save_stats_predict(stats)
         memory["favorite"] = FAVORITE_COINS[:5]; memory["hated"] = HATED_COINS[:5]; save_memory(memory)
+
+def get_stats_message():
+    stats = load_stats_predict()
+    if stats["total"] == 0: return "🧠 **СТАТИСТИКА ПРОГНОЗОВ**\n\nПока нет данных. Сделай первый прогноз через 📈 ТОП РЫНКА."
+    winrate = (stats["success"] / stats["total"] * 100) if stats["total"] > 0 else 0
+    return f"""
+🧠 **ТОЧНОСТЬ ДУХОВ**
+
+📊 **За всё время:**
+• Всего прогнозов: {stats['total']}
+• ✅ Сбылось: {stats['success']}
+• ❌ Не сбылось: {stats['failed']}
+• 🎯 Точность: **{winrate:.1f}%**
+
+💫 {'Духи мудры и точны.' if winrate >= 60 else 'Духи учатся с каждой сделкой.'}
+"""
 
 def get_fear_greed_index() -> str:
     try:
@@ -631,7 +646,7 @@ async def stop_reminder(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v27.2\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v27.3\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -702,6 +717,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = await update.message.reply_text("📰 Ищу новости...")
             news = get_news()
             await msg.edit_text(news if news else "🌫️ Новостей нет.", parse_mode=ParseMode.MARKDOWN)
+        elif text == "🧠 СТАТ ПРОГНОЗОВ":
+            await update.message.reply_text(get_stats_message(), parse_mode=ParseMode.MARKDOWN)
         elif text == "🌫️ ИСТОРИЯ":
             if not CLOSED_SIGNALS: await update.message.reply_text("🌫️ Пусто.")
             else:
@@ -789,7 +806,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v27.2 (Аналитик)")
+    print("🌙 TradeSight Pro WHISPER v27.3 (Аналитик)")
     print("="*60)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -804,7 +821,7 @@ def main():
     app.job_queue.run_repeating(check_predictions, interval=900, first=180)
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
-    print("🌙 Демон-Аналитик запущен.")
+    print("🌙 Демон-Аналитик v27.3 запущен.")
     app.run_polling()
 
 if __name__ == "__main__":
