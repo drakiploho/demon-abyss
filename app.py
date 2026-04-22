@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v27.0 WHISPER (Две стратегии)
-+ Пробой тренда (Trend Following)
-+ Отскок от Бездны (Mean Reversion)
+TradeSight Pro v27.2 WHISPER (Аналитик)
++ Расширенная сводка с монетами-лидерами
++ Свечной паттерн BTC
++ Активные прогнозы в сводке
++ Оптимизированные интервалы фоновых задач
 """
 
 import asyncio
@@ -178,7 +180,7 @@ def get_btc_correlation(symbol: str) -> float:
     except: return 0.0
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup([["📊 СВОДКА", "🔥 СИГНАЛЫ"], ["⏳ АКТИВНЫЕ", "📚 ОБУЧЕНИЕ"], ["📈 ГРАФИК", "⚡ СКАЛЬП"], ["⚙️ ЕЩЁ"]], resize_keyboard=True)
-MORE_KEYBOARD = ReplyKeyboardMarkup([["🌫️ ИСТОРИЯ"], ["⚙️ СТРОГОСТЬ", "🔇 ТИХО"], ["🔙 НАЗАД"]], resize_keyboard=True)
+MORE_KEYBOARD = ReplyKeyboardMarkup([["📰 НОВОСТИ", "🌫️ ИСТОРИЯ"], ["⚙️ СТРОГОСТЬ", "🔇 ТИХО"], ["🔙 НАЗАД"]], resize_keyboard=True)
 
 def load_predictions(): return json.load(open(PREDICTIONS_FILE, 'r')) if PREDICTIONS_FILE.exists() else []
 def save_predictions(p): json.dump(p, open(PREDICTIONS_FILE, 'w'), indent=2)
@@ -231,6 +233,21 @@ def get_fear_greed_index() -> str:
         return f"😱 **ИНДЕКС СТРАХА:** {v} — {c}\n💡 {adv}\n🎯 {act}"
     except: return "🌫️ Не удалось загрузить индекс."
 
+def get_top_in_sector(sector_name, limit=3):
+    try:
+        data = session.get_tickers(category="spot")
+        if data.get("retCode") != 0: return []
+        tickers = data["result"]["list"]
+        sector_coins = []
+        for t in tickers:
+            sym = t["symbol"].replace("USDT", "")
+            if sym in SECTORS.get(sector_name, []):
+                ch = float(t.get("price24hPcnt", 0)) * 100
+                sector_coins.append((sym, ch))
+        sector_coins.sort(key=lambda x: x[1], reverse=True)
+        return sector_coins[:limit]
+    except: return []
+
 def get_cluster_analysis() -> str:
     try:
         data = session.get_tickers(category="spot")
@@ -243,11 +260,19 @@ def get_cluster_analysis() -> str:
                 if sym in coins: gains.append(float(t.get("price24hPcnt", 0)) * 100)
             if gains: sector_perf[sec] = sum(gains) / len(gains)
         if not sector_perf: return ""
-        msg = "📊 **СЕКТОРА РЫНКА (24ч)**\n\n"
+        msg = "📈 **СЕКТОРА И КОНКРЕТНЫЕ МОНЕТЫ:**\n"
         for sec, avg in sorted(sector_perf.items(), key=lambda x: x[1], reverse=True):
-            msg += f"{'🟢' if avg>0 else '🔴'} **{sec}:** {avg:+.1f}%\n"
-        best, worst = max(sector_perf, key=sector_perf.get), min(sector_perf, key=sector_perf.get)
-        msg += f"\n💡 **Капитал идёт в {best}**\n🎯 **Избегай {worst}**"
+            em = "🟢" if avg > 0 else "🔴"
+            msg += f"{em} **{sec}:** {avg:+.1f}% — "
+            top_coins = get_top_in_sector(sec, 3)
+            if top_coins:
+                coins_str = ", ".join([f"{c[0]} ({c[1]:+.1f}%)" for c in top_coins])
+                msg += f"{coins_str}\n"
+            else:
+                msg += "данные не загружены\n"
+        best = max(sector_perf, key=sector_perf.get)
+        worst = min(sector_perf, key=sector_perf.get)
+        msg += f"\n💡 **СОВЕТ:** Капитал идёт в **{best}**. Из **{worst}** лучше пока выйти.\n"
         return msg
     except: return ""
 
@@ -255,7 +280,7 @@ def get_dxy() -> str:
     try:
         r = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=10)
         eur = r.json()['rates']['EUR']; dxy = 100 * (1/eur) ** 0.576
-        return f"💵 **DXY:** {dxy:.1f}\n💡 Рост DXY = давление на крипту."
+        return f"💵 **DXY:** {dxy:.1f}"
     except: return ""
 
 def get_news():
@@ -343,7 +368,7 @@ def detect_candle_pattern(df: pd.DataFrame) -> str:
         if is_bull_last and not is_bull_prev: key = "bullish_engulfing"
         elif not is_bull_last and is_bull_prev: key = "bearish_engulfing"
     if key and key in CANDLE_PATTERNS:
-        p = CANDLE_PATTERNS[key]; return f"\n🕯️ **{p['name']}**\n📖 {p['desc']}\n🎯 {p['action']}"
+        p = CANDLE_PATTERNS[key]; return f"🕯️ **{p['name']}**: {p['desc']} {p['action']}"
     return ""
 
 def analyze_symbol(symbol, interval="5", fast_mode=False):
@@ -439,7 +464,25 @@ def get_market_summary():
     if green >= 10: update_mood("excited"); sentiment = get_phrase("market_up")
     elif green >= 6: update_mood("neutral"); sentiment = get_phrase("market_neutral")
     else: update_mood("cautious"); sentiment = get_phrase("market_down")
-    return f"📊 **РЫНОК:** 🟢{green} 🔴{total-green}\n{sentiment}"
+    return f"🌡️ **РЫНОК:** 🟢{green} 🔴{total-green} — {sentiment}"
+
+def get_pending_predictions():
+    preds = load_predictions()
+    pending = []
+    for p in preds:
+        if not p.get("checked"):
+            pred_time = datetime.fromisoformat(p["time"])
+            time_left = pred_time + timedelta(hours=4) - datetime.now()
+            if time_left.total_seconds() > 0:
+                hours, rem = divmod(time_left.seconds, 3600)
+                mins, _ = divmod(rem, 60)
+                pending.append({
+                    "symbol": p["symbol"],
+                    "direction": "рост" if p["direction"] == "up" else "падение",
+                    "target": p["start_price"],
+                    "time_left": f"{hours}ч {mins}м"
+                })
+    return pending[:3]
 
 async def auto_scan_loop(context):
     global LAST_SIGNAL_TIME
@@ -483,19 +526,39 @@ async def emergency_check(context):
 
 async def full_summary_loop(context):
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(300)
         if SILENT_MODE or is_sleep_time(): continue
         msk = pytz.timezone('Europe/Moscow'); now = datetime.now(msk)
         if now.hour % 4 != 0 or now.minute != 0: continue
         try:
-            market, clusters, dxy, oi, news = get_market_summary(), get_cluster_analysis(), get_dxy(), get_open_interest(), get_news()
+            market = get_market_summary()
+            clusters = get_cluster_analysis()
+            dxy_val = get_dxy()
+            if dxy_val:
+                dxy_num = float(dxy_val.replace("💵 **DXY:** ", ""))
+                if dxy_num > 105: dxy_text = f"{dxy_val} (высокий, давит на крипту)"
+                elif dxy_num < 100: dxy_text = f"{dxy_val} (низкий, попутный ветер для крипты)"
+                else: dxy_text = f"{dxy_val} (нейтральный)"
+            else:
+                dxy_text = ""
+            oi = get_open_interest()
+            btc_pattern = ""
+            btc_df = get_klines("BTCUSDT", "15", 3)
+            if btc_df is not None:
+                pattern = detect_candle_pattern(btc_df)
+                if pattern: btc_pattern = f"\n🕯️ **СВЕЧНОЙ ПАТТЕРН (BTC):** {pattern}\n"
+            pending = get_pending_predictions()
             signals = []
             for sym in get_top_symbols(15):
                 s = analyze_symbol(sym)
                 if s:
                     signals.append(s)
                     if len(signals) >= 3: break
-            report = f"📊 **АВТО-СВОДКА** ({now.strftime('%H:%M')})\n\n{market}\n\n{clusters if clusters else ''}\n{dxy if dxy else ''}\n{oi if oi else ''}\n\n{news if news else ''}\n"
+            report = f"📊 **АВТО-СВОДКА** ({now.strftime('%H:%M')})\n\n{market}\n\n{clusters if clusters else ''}\n{dxy_text if dxy_text else ''}\n{oi if oi else ''}{btc_pattern}"
+            if pending:
+                report += "\n🧠 **ПРОГНОЗЫ НА ПРОВЕРКЕ:**\n"
+                for p in pending:
+                    report += f"• {p['symbol']}: жду {p['direction']} до ${p['target']:.4f} (осталось {p['time_left']})\n"
             if signals:
                 report += f"\n🟢 **ТОП-{len(signals)} СИГНАЛОВ:**\n"
                 for s in signals:
@@ -504,6 +567,7 @@ async def full_summary_loop(context):
                 report += f"\n{get_phrase('signal_fail')}"
             await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=report, parse_mode=ParseMode.MARKDOWN)
         except Exception as e: await notify_error(context, f"full_summary_loop: {e}")
+        await asyncio.sleep(300)
 
 async def wake_up_message(context):
     if SILENT_MODE: return
@@ -567,7 +631,7 @@ async def stop_reminder(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v27.0\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v27.2\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -579,18 +643,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if text == "📊 СВОДКА":
             msg = await update.message.reply_text("📊 Формирую...")
-            market, clusters, dxy, oi, news = get_market_summary(), get_cluster_analysis(), get_dxy(), get_open_interest(), get_news()
+            market = get_market_summary()
+            clusters = get_cluster_analysis()
+            dxy_val = get_dxy()
+            if dxy_val:
+                dxy_num = float(dxy_val.replace("💵 **DXY:** ", ""))
+                if dxy_num > 105: dxy_text = f"{dxy_val} (высокий, давит на крипту)"
+                elif dxy_num < 100: dxy_text = f"{dxy_val} (низкий, попутный ветер для крипты)"
+                else: dxy_text = f"{dxy_val} (нейтральный)"
+            else: dxy_text = ""
+            oi = get_open_interest()
+            btc_pattern = ""
+            btc_df = get_klines("BTCUSDT", "15", 3)
+            if btc_df is not None:
+                pattern = detect_candle_pattern(btc_df)
+                if pattern: btc_pattern = f"\n🕯️ **СВЕЧНОЙ ПАТТЕРН (BTC):** {pattern}\n"
+            pending = get_pending_predictions()
             signals = []
             for sym in get_top_symbols(15):
                 s = analyze_symbol(sym)
                 if s:
                     signals.append(s)
                     if len(signals) >= 3: break
-            report = f"📊 **СВОДКА**\n\n{market}\n\n{clusters if clusters else ''}\n{dxy if dxy else ''}\n{oi if oi else ''}\n\n{news if news else ''}\n"
+            report = f"📊 **СВОДКА**\n\n{market}\n\n{clusters if clusters else ''}\n{dxy_text if dxy_text else ''}\n{oi if oi else ''}{btc_pattern}"
+            if pending:
+                report += "\n🧠 **ПРОГНОЗЫ НА ПРОВЕРКЕ:**\n"
+                for p in pending:
+                    report += f"• {p['symbol']}: жду {p['direction']} до ${p['target']:.4f} (осталось {p['time_left']})\n"
             if signals:
                 report += f"\n🟢 **ТОП-{len(signals)} СИГНАЛОВ:**\n"
                 for s in signals:
                     report += f"• {s['symbol']} | {s['strategy']} | Score {s['score']:.0f} | ${s['price']:.4f} → ${s['tp']:.4f}\n"
+            else:
+                report += f"\n{get_phrase('signal_fail')}"
             await msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
         elif text == "🔥 СИГНАЛЫ": await signal_search(update, context, fast=False)
         elif text == "⚡ СКАЛЬП": await signal_search(update, context, fast=True)
@@ -613,6 +698,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             l = random.choice(LESSONS)
             await update.message.reply_text(f"{get_phrase('lesson_intro')}\n\n📚 **{l['title']}**\n\n{l['text']}\n\n💡 **Как применять:** {l['use']}", parse_mode=ParseMode.MARKDOWN)
         elif text == "⚙️ ЕЩЁ": await update.message.reply_text("Выбери:", reply_markup=MORE_KEYBOARD)
+        elif text == "📰 НОВОСТИ":
+            msg = await update.message.reply_text("📰 Ищу новости...")
+            news = get_news()
+            await msg.edit_text(news if news else "🌫️ Новостей нет.", parse_mode=ParseMode.MARKDOWN)
         elif text == "🌫️ ИСТОРИЯ":
             if not CLOSED_SIGNALS: await update.message.reply_text("🌫️ Пусто.")
             else:
@@ -700,14 +789,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v27.0 (Две стратегии)")
+    print("🌙 TradeSight Pro WHISPER v27.2 (Аналитик)")
     print("="*60)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.job_queue.run_repeating(wake_up_message, interval=60, first=10)
-    app.job_queue.run_repeating(full_summary_loop, interval=60, first=30)
+    app.job_queue.run_repeating(full_summary_loop, interval=300, first=30)
     app.job_queue.run_repeating(auto_scan_loop, interval=300, first=60)
     app.job_queue.run_repeating(emergency_check, interval=300, first=90)
     app.job_queue.run_repeating(evening_ritual, interval=60, first=150)
@@ -715,7 +804,7 @@ def main():
     app.job_queue.run_repeating(check_predictions, interval=900, first=180)
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
-    print("🌙 Демон с двумя стратегиями запущен.")
+    print("🌙 Демон-Аналитик запущен.")
     app.run_polling()
 
 if __name__ == "__main__":
