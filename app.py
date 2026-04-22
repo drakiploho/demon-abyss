@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v27.3 WHISPER (Аналитик)
-+ Возвращена кнопка СТАТ ПРОГНОЗОВ
-+ Отчёты о прогнозах приходят всегда (даже в тихом режиме)
-+ Исправлен текст в статистике прогнозов
+TradeSight Pro v28.0 WHISPER (Всевидящий)
++ 5 стратегий BUY (Пробой, Отскок, Скрытый бык, Кит, Золотой крест)
++ Улучшенный Скальпинг (min_score 40, больше сигналов)
++ Полная автоматизация сводок и прогнозов
 """
 
 import asyncio
@@ -388,42 +388,91 @@ def detect_candle_pattern(df: pd.DataFrame) -> str:
 
 def analyze_symbol(symbol, interval="5", fast_mode=False):
     df = get_klines(symbol, interval, 100 if fast_mode else 200)
-    if df is None or len(df) < 30: return None
+    if df is None or len(df) < 50: return None
     df = calculate_indicators(df)
-    last, prev = df.iloc[-1], df.iloc[-2]
-    price, atr = last["close"], last["atr"]
-    vol_thresh = 1.1 if fast_mode else 1.3
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    price = last["close"]
+    atr = last["atr"]
+    vol_thresh = 1.0 if fast_mode else 1.2
+
     if last["volume_ratio"] < vol_thresh: return None
+
     signal_info = None
-    strategy_name = ""
-    strategy_desc = ""
-    if (last["ema20"] > last["ema50"] and last["close"] > prev["high"] * 1.001 and 
-        50 < last["rsi"] < (80 if fast_mode else 75) and last["macd"] > last["macd_signal"]):
-        sl = price - atr * (1.2 if fast_mode else 1.5)
-        tp = price + atr * (1.5 if fast_mode else 2.5)
-        score = 60
-        strategy_name = "ПРОБОЙ ТРЕНДА"
+
+    # --- 1. ПРОБОЙ ТРЕНДА ---
+    if (last["ema20"] > last["ema50"] and 
+        last["close"] > prev["high"] * 1.001 and 
+        50 < last["rsi"] < (80 if fast_mode else 75) and 
+        last["macd"] > last["macd_signal"]):
+        
+        sl = price - atr * (1.0 if fast_mode else 1.5)
+        tp = price + atr * (1.2 if fast_mode else 2.5)
+        score = 65
+        strategy_name = "🟢 ПРОБОЙ ТРЕНДА"
         strategy_desc = "Рынок в движении. Цена пробила максимум, как спортсмен — рекорд."
         signal_info = (sl, tp, score, strategy_name, strategy_desc)
+
+    # --- 2. ОТСКОК ОТ БЕЗДНЫ ---
     elif (last["close"] <= last["bb_lower"] and last["rsi"] < 45 and 
           last["volume_ratio"] > 1.2 and not (last["ema20"] > last["ema50"])):
-        sl = price - atr * 1.0
+        
+        sl = price - atr * 0.8
         tp = price + atr * 1.5
         score = 55
-        strategy_name = "ОТСКОК ОТ БЕЗДНЫ"
+        strategy_name = "🟡 ОТСКОК ОТ БЕЗДНЫ"
         strategy_desc = "Рынок в боковике. Цена у нижней границы, ждём отскок вверх."
         signal_info = (sl, tp, score, strategy_name, strategy_desc)
+
+    # --- 3. СКРЫТЫЙ БЫК (Дивергенция RSI) ---
+    elif (last["close"] < prev["close"] and last["rsi"] > prev["rsi"] and 
+          last["rsi"] < 50 and last["volume_ratio"] > 1.0):
+        
+        sl = price - atr * 1.0
+        tp = price + atr * 1.8
+        score = 60
+        strategy_name = "🐂 СКРЫТЫЙ БЫК"
+        strategy_desc = "Цена падает, но сила медведей иссякает. Возможен разворот вверх."
+        signal_info = (sl, tp, score, strategy_name, strategy_desc)
+
+    # --- 4. КИТ НА ОХОТЕ (VSA) ---
+    elif (last["close"] < last["open"] and last["volume_ratio"] > 2.5 and 
+          last["low"] > prev["low"]):
+        
+        sl = price - atr * 0.5
+        tp = price + atr * 1.5
+        score = 70
+        strategy_name = "🐋 КИТ НА ОХОТЕ"
+        strategy_desc = "Кто-то крупный вытряхнул слабые руки. Ждём пампа."
+        signal_info = (sl, tp, score, strategy_name, strategy_desc)
+
+    # --- 5. ЗОЛОТОЙ КРЕСТ (EMA) ---
+    elif (prev["ema20"] <= prev["ema50"] and last["ema20"] > last["ema50"] and 
+          last["volume_ratio"] > 1.0):
+        
+        sl = price - atr * 1.5
+        tp = price + atr * 2.0
+        score = 75
+        strategy_name = "✝️ ЗОЛОТОЙ КРЕСТ"
+        strategy_desc = "Быстрая EMA пересекла медленную вверх. Смена тренда."
+        signal_info = (sl, tp, score, strategy_name, strategy_desc)
+
     if not signal_info: return None
+
     sl, tp, base_score, strat_name, strat_desc = signal_info
+    
     score = base_score
-    if last["rsi"] > 55 and strat_name == "ПРОБОЙ ТРЕНДА": score += 15
-    if last["rsi"] < 40 and strat_name == "ОТСКОК ОТ БЕЗДНЫ": score += 15
-    if last["volume_ratio"] > 1.8: score += 15
-    min_score = 50 if fast_mode else MIN_SCORE
+    if last["rsi"] > 55 and strat_name == "🟢 ПРОБОЙ ТРЕНДА": score += 10
+    if last["rsi"] < 40 and strat_name == "🟡 ОТСКОК ОТ БЕЗДНЫ": score += 10
+    if last["volume_ratio"] > 1.8: score += 10
+    
+    min_score = 40 if fast_mode else MIN_SCORE
     if score < min_score: return None
+
     rr = abs(tp - price) / abs(price - sl) if abs(price - sl) > 0 else 0
     btc_corr = get_btc_correlation(symbol)
     pattern = detect_candle_pattern(df)
+    
     return {
         "symbol": symbol, "signal": "BUY", "price": price, "tp": tp, "sl": sl,
         "score": score, "rsi": last["rsi"], "volume_ratio": last["volume_ratio"],
@@ -434,12 +483,17 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
 def format_signal(s):
     stars = "🔥" * min(5, int(s["score"] / 20) + 1)
     corr_line = f"\n📈 Корр. с BTC: {s.get('btc_corr', 0):.2f}" if s.get('btc_corr', 0) > 0.5 else ""
-    if s.get("strategy") == "ПРОБОЙ ТРЕНДА":
-        strat_emoji = "🟢🟢🟢"
-    else:
-        strat_emoji = "🟡🟡🟡"
+    
+    strat_emoji = s.get('strategy', '🟢')[0] 
+    if "ПРОБОЙ" in s['strategy']: strat_emoji = "🟢🟢🟢"
+    elif "ОТСКОК" in s['strategy']: strat_emoji = "🟡🟡🟡"
+    elif "СКРЫТЫЙ" in s['strategy']: strat_emoji = "🐂🐂🐂"
+    elif "КИТ" in s['strategy']: strat_emoji = "🐋🐋🐋"
+    elif "КРЕСТ" in s['strategy']: strat_emoji = "✝️✝️✝️"
+        
     personality = "\n💚 *О, мой старый знакомый!*" if s['symbol'] in FAVORITE_COINS else ("\n💔 *Этот актив вечно меня обманывает.*" if s['symbol'] in HATED_COINS else "")
     phrase = get_phrase("signal_found_buy")
+    
     return f"""
 {strat_emoji} [ СТРАТЕГИЯ: {s['strategy']} ] {strat_emoji}
 **Рынок:** {s['strategy_desc']}
@@ -457,14 +511,20 @@ def format_signal(s):
 
 def generate_explanation(s):
     reasons = []
-    if s["strategy"] == "ПРОБОЙ ТРЕНДА":
+    if "ПРОБОЙ" in s['strategy']:
         if s["volume_ratio"] > 1.8: reasons.append("🔥 Объём высокий — рынок активен.")
         reasons.append("📈 Тренд восходящий — покупатели сильнее.")
         if 50 < s["rsi"] < 70: reasons.append(f"💪 RSI={s['rsi']:.0f} — монета не перегрета.")
-    else:
+    elif "ОТСКОК" in s['strategy']:
         reasons.append("📊 Рынок в боковике, цена у нижней границы.")
-        if s["rsi"] < 45: reasons.append(f"💪 RSI={s['rsi']:.0f} — монета перепродана, ждём отскок.")
-        if s["volume_ratio"] > 1.2: reasons.append("📈 Объём подтверждает интерес.")
+        if s["rsi"] < 45: reasons.append(f"💪 RSI={s['rsi']:.0f} — монета перепродана.")
+    elif "СКРЫТЫЙ" in s['strategy']:
+        reasons.append("🐂 Цена падает, но индикатор силы (RSI) растёт. Медведи слабеют.")
+    elif "КИТ" in s['strategy']:
+        reasons.append(f"🐋 Крупный игрок выкупил панику. Объём x{s['volume_ratio']:.1f}.")
+    elif "КРЕСТ" in s['strategy']:
+        reasons.append("✝️ Быстрая скользящая средняя пересекла медленную вверх. Тренд сменился.")
+        
     return f"📘 **ОБЪЯСНЕНИЕ**\n\n{chr(10).join(f'• {r}' for r in reasons)}\n\n🎯 Цель = {s['tp']:.6f}\n🛑 Стоп = {s['sl']:.6f}"
 
 def get_market_summary():
@@ -646,7 +706,7 @@ async def stop_reminder(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v27.3\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v28.0\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -749,15 +809,21 @@ async def signal_search(update: Update, context: ContextTypes.DEFAULT_TYPE, fast
     mode = "⚡ СКАЛЬП" if fast else "🔥 СИГНАЛЫ"
     msg = await update.message.reply_text(f"🔮 Ищу {mode}...")
     signals = []; interval = "1" if fast else "5"
-    for sym in get_top_symbols(20):
+    for sym in get_top_symbols(25):
         s = analyze_symbol(sym, interval, fast_mode=fast)
         if s:
+            # Для скальпинга берем даже слабые сигналы, если их нет совсем
+            if fast and s['score'] < 45 and len(signals) > 0: continue
+                
             key = f"{sym}-BUY-{interval}"
-            if key in SENT_SIGNALS and datetime.now() - SENT_SIGNALS[key] < timedelta(minutes=30 if fast else 120): continue
-            SENT_SIGNALS[key] = datetime.now(); signals.append(s)
-            if len(signals) >= 3: break
+            if key in SENT_SIGNALS and datetime.now() - SENT_SIGNALS[key] < timedelta(minutes=10 if fast else 120): continue
+            SENT_SIGNALS[key] = datetime.now()
+            signals.append(s)
+            if len(signals) >= 5: break
+            
     if not signals:
         await msg.edit_text(f"{get_phrase('signal_fail')}\n🌫️ Нет сигналов ({mode})"); return
+        
     await msg.edit_text(f"🔮 Найдено: {len(signals)}")
     DAILY_STATS["signals_found"] += len(signals)
     for s in signals:
@@ -806,7 +872,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v27.3 (Аналитик)")
+    print("🌙 TradeSight Pro WHISPER v28.0 (Всевидящий)")
     print("="*60)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -821,7 +887,7 @@ def main():
     app.job_queue.run_repeating(check_predictions, interval=900, first=180)
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
-    print("🌙 Демон-Аналитик v27.3 запущен.")
+    print("🌙 Демон-Всевидящий запущен. 5 стратегий активны.")
     app.run_polling()
 
 if __name__ == "__main__":
