@@ -4,7 +4,7 @@
 TradeSight Pro v27.3 WHISPER (Аналитик)
 + Возвращена кнопка СТАТ ПРОГНОЗОВ
 + Отчёты о прогнозах приходят всегда (даже в тихом режиме)
-+ Ускорена проверка прогнозов (каждые 15 минут)
++ Исправлен текст в статистике прогнозов
 """
 
 import asyncio
@@ -213,7 +213,6 @@ async def check_predictions(context: ContextTypes.DEFAULT_TYPE):
         else:
             stats["failed"] += 1
             if p['symbol'] not in HATED_COINS: HATED_COINS.append(p['symbol'])
-        # Отправляем отчёт ВСЕГДА, независимо от SILENT_MODE
         phrase = get_phrase("prediction_success") if success else get_phrase("prediction_fail")
         await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"{phrase}\n{p['symbol']}: ${p['start_price']:.4f} → ${cur:.4f}")
     if updated:
@@ -222,7 +221,8 @@ async def check_predictions(context: ContextTypes.DEFAULT_TYPE):
 
 def get_stats_message():
     stats = load_stats_predict()
-    if stats["total"] == 0: return "🧠 **СТАТИСТИКА ПРОГНОЗОВ**\n\nПока нет данных. Сделай первый прогноз через 📈 ТОП РЫНКА."
+    if stats["total"] == 0:
+        return "🧠 **СТАТИСТИКА ПРОГНОЗОВ**\n\nПока нет данных. Прогнозы создаются автоматически, когда бот анализирует рынок. Дождись ближайшей авто-сводки или нажми 📊 СВОДКА."
     winrate = (stats["success"] / stats["total"] * 100) if stats["total"] > 0 else 0
     return f"""
 🧠 **ТОЧНОСТЬ ДУХОВ**
