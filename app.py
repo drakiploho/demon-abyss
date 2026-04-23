@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v30.1 WHISPER (Телохранитель)
-+ Режим «Пристального внимания» (первые 15 мин проверка каждую минуту)
-+ Умный зазор безубытка
-+ Индикатор «Жирный сигнал»
+TradeSight Pro v30.2 WHISPER (Свободный Художник)
+Убрана блокировка Анти-тильта. Только советы и поток сигналов.
++ Умный зазор безубытка, Жирные сигналы, Пристальное внимание (1 мин).
 """
 import asyncio, json, logging, os, sys, time, traceback, random, pytz, re, io
 from datetime import datetime, timedelta
@@ -45,7 +44,6 @@ PREDICTIONS_FILE = DATA_DIR / "predictions.json"
 STATS_PREDICT_FILE = DATA_DIR / "stats_predictions.json"
 MEMORY_FILE = DATA_DIR / "memory.json"
 HISTORY_FILE = DATA_DIR / "history.json"
-ANTI_TILT_FILE = DATA_DIR / "anti_tilt.json"
 
 def load_memory():
     if MEMORY_FILE.exists(): return json.load(open(MEMORY_FILE, 'r'))
@@ -57,7 +55,6 @@ FAVORITE_COINS = memory.get("favorite", [])
 HATED_COINS = memory.get("hated", [])
 BOT_MOOD = memory.get("mood", "neutral")
 LAST_USER_INTERACTION = datetime.now()
-ANTI_TILT_BLOCKS = {"ПРОБОЙ": None, "ОТСКОК": None, "СКРЫТЫЙ": None, "КИТ": None, "КРЕСТ": None}
 
 PHRASES = {
     "wake_up": ["🌅 Рынок просыпается. Сегодня я чувствую прилив сил.", "☕️ Пробуждение. Мои видения пока туманны, но скоро прояснятся."],
@@ -70,7 +67,8 @@ PHRASES = {
     "prediction_success": ["✅ Моё видение сбылось!", "🎯 В яблочко!"],
     "prediction_fail": ["❌ Видение не сбылось. Рынок хаотичен.", "🌫️ Бездна ошиблась. Прости, смертный."],
     "evening": ["🌙 День подходит к концу.", "😴 Я устал. Пора в Бездну."],
-    "lesson_intro": ["📚 Время для мудрости Бездны.", "🧠 Пока рынок спит, займёмся твоим развитием."]
+    "lesson_intro": ["📚 Время для мудрости Бездны.", "🧠 Пока рынок спит, займёмся твоим развитием."],
+    "tilt_warning": ["💀 Три удара подряд... Бездна шепчет быть осторожнее.", "😵‍💫 Стратегия хромает. Может, сменим пластинку?", "☕️ Тяжелый период. Сделай паузу, смертный."]
 }
 def get_phrase(c): return random.choice(PHRASES.get(c, ["..."]))
 
@@ -116,13 +114,6 @@ LESSONS = [
     {"title": "📈 Объём", "text": "Объём подтверждает силу движения.", "use": "Входи только если объём выше среднего в 1.5+ раза."},
     {"title": "🎯 ATR", "text": "ATR показывает волатильность.", "use": "Ставь стоп-лосс на расстоянии 1.5-2 ATR от входа."}
 ]
-
-CANDLE_PATTERNS = {
-    "doji": {"name": "Доджи", "desc": "Нерешительность рынка.", "action": "Жди подтверждения."},
-    "hammer": {"name": "Молот", "desc": "Бычий разворот.", "action": "Присмотрись к покупкам."},
-    "bullish_engulfing": {"name": "Бычье поглощение", "desc": "Покупатели перехватили инициативу.", "action": "Отличный сигнал для лонга."},
-    "bearish_engulfing": {"name": "Медвежье поглощение", "desc": "Продавцы перехватили инициативу.", "action": "Отличный сигнал для шорта."}
-}
 
 SECTORS = {
     "Layer-1": ["BTC","ETH","SOL","ADA","AVAX","DOT","NEAR","ALGO"], "DeFi": ["UNI","AAVE","MKR","SNX","COMP","CRV","SUSHI"],
@@ -198,33 +189,6 @@ def get_stats_message():
     winrate = (stats["success"] / stats["total"] * 100) if stats["total"] > 0 else 0
     return f"🧠 **ТОЧНОСТЬ ДУХОВ**\n\n📊 За всё время: {stats['total']}\n✅ Сбылось: {stats['success']}\n❌ Не сбылось: {stats['failed']}\n🎯 Точность: **{winrate:.1f}%**"
 
-def get_fear_greed_index() -> str:
-    try:
-        r = requests.get("https://api.alternative.me/fng/", timeout=10)
-        item = r.json()["data"][0]; v = int(item["value"]); c = item["value_classification"]
-        if v < 25: adv, act = "Экстремальный страх.", "Присмотреться к покупкам"
-        elif v < 45: adv, act = "Страх.", "Выборочные покупки"
-        elif v < 55: adv, act = "Нейтрально.", "Ждать"
-        elif v < 75: adv, act = "Жадность.", "Фиксировать прибыль"
-        else: adv, act = "Экстремальная жадность.", "Не покупать"
-        return f"😱 **ИНДЕКС СТРАХА:** {v} — {c}\n💡 {adv}\n🎯 {act}"
-    except: return "🌫️ Не удалось загрузить индекс."
-
-def get_top_in_sector(sector_name, limit=3):
-    try:
-        data = session.get_tickers(category="spot")
-        if data.get("retCode") != 0: return []
-        tickers = data["result"]["list"]
-        sector_coins = []
-        for t in tickers:
-            sym = t["symbol"].replace("USDT", "")
-            if sym in SECTORS.get(sector_name, []):
-                ch = float(t.get("price24hPcnt", 0)) * 100
-                sector_coins.append((sym, ch))
-        sector_coins.sort(key=lambda x: x[1], reverse=True)
-        return sector_coins[:limit]
-    except: return []
-
 def get_cluster_analysis() -> str:
     try:
         data = session.get_tickers(category="spot")
@@ -249,27 +213,26 @@ def get_cluster_analysis() -> str:
         return msg
     except: return ""
 
-def get_dxy() -> str:
+def get_top_in_sector(sector_name, limit=3):
     try:
-        r = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=10)
-        eur = r.json()['rates']['EUR']; dxy = 100 * (1/eur) ** 0.576
-        return f"💵 **DXY:** {dxy:.1f}"
-    except: return ""
+        data = session.get_tickers(category="spot")
+        if data.get("retCode") != 0: return []
+        tickers = data["result"]["list"]
+        sector_coins = []
+        for t in tickers:
+            sym = t["symbol"].replace("USDT", "")
+            if sym in SECTORS.get(sector_name, []):
+                ch = float(t.get("price24hPcnt", 0)) * 100
+                sector_coins.append((sym, ch))
+        sector_coins.sort(key=lambda x: x[1], reverse=True)
+        return sector_coins[:limit]
+    except: return []
 
 def get_news():
     try:
         r = requests.get("https://forklog.com/rss/", timeout=10)
         item = ET.fromstring(r.content).find('.//item')
         if item is not None: return f"📰 **НОВОСТЬ:** [{item.find('title').text}]({item.find('link').text})"
-    except: pass
-    return ""
-
-def get_open_interest() -> str:
-    try:
-        resp = session.get_open_interest(category="linear", symbol="BTCUSDT", interval="15min", limit=1)
-        if resp.get("retCode") == 0:
-            oi = float(resp["result"]["list"][0]["openInterest"])
-            return f"🔥 **OI (BTC):** ${oi:,.0f}\n💡 Рост OI при падении = возможен сквиз."
     except: pass
     return ""
 
@@ -302,33 +265,6 @@ def calculate_indicators(df):
     df["bb_upper"] = bb.bollinger_hband()
     return df
 
-def detect_candle_pattern(df: pd.DataFrame) -> str:
-    if df is None or len(df) < 3: return ""
-    last, prev = df.iloc[-1], df.iloc[-2]
-    body_last, body_prev = abs(last['close'] - last['open']), abs(prev['close'] - prev['open'])
-    upper = last['high'] - max(last['close'], last['open'])
-    lower = min(last['close'], last['open']) - last['low']
-    range_last = last['high'] - last['low']
-    is_bull_last, is_bull_prev = last['close'] > last['open'], prev['close'] > prev['open']
-    key = None
-    if body_last < range_last * 0.1: key = "doji"
-    elif lower > body_last * 2 and upper < body_last * 0.5: key = "hammer" if is_bull_last else "hanging_man"
-    elif body_last > body_prev * 1.2:
-        if is_bull_last and not is_bull_prev: key = "bullish_engulfing"
-        elif not is_bull_last and is_bull_prev: key = "bearish_engulfing"
-    if key and key in CANDLE_PATTERNS:
-        p = CANDLE_PATTERNS[key]; return f"🕯️ **{p['name']}**: {p['desc']} {p['action']}"
-    return ""
-
-def is_strategy_blocked(strategy_name):
-    if not strategy_name: return False
-    for key in ANTI_TILT_BLOCKS:
-        if key in strategy_name:
-            block_time = ANTI_TILT_BLOCKS[key]
-            if block_time and datetime.now() < block_time:
-                return True
-    return False
-
 def analyze_symbol(symbol, interval="5", fast_mode=False):
     df = get_klines(symbol, interval, 100 if fast_mode else 200)
     if df is None or len(df) < 50: return None
@@ -346,42 +282,37 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
     # 1. ПРОБОЙ ТРЕНДА
     if (last["ema20"] > last["ema50"] and last["close"] > prev["high"] * 1.001 and 
         50 < last["rsi"] < (80 if fast_mode else 75) and last["macd"] > last["macd_signal"]):
-        if not is_strategy_blocked("ПРОБОЙ"):
-            sl = price - atr * (1.0 if fast_mode else 1.5)
-            tp = price + atr * (1.2 if fast_mode else 2.5)
-            signal_info = (sl, tp, 65, "🟢 ПРОБОЙ ТРЕНДА", "Рынок в движении. Цена пробила максимум.")
+        sl = price - atr * (1.0 if fast_mode else 1.5)
+        tp = price + atr * (1.2 if fast_mode else 2.5)
+        signal_info = (sl, tp, 65, "🟢 ПРОБОЙ ТРЕНДА", "Рынок в движении. Цена пробила максимум.")
 
     # 2. ОТСКОК
     elif (last["close"] <= last["bb_lower"] and last["rsi"] < 45 and 
           last["volume_ratio"] > 1.2 and not (last["ema20"] > last["ema50"])):
-        if not is_strategy_blocked("ОТСКОК"):
-            sl = price - atr * 0.8
-            tp = price + atr * 1.5
-            signal_info = (sl, tp, 55, "🟡 ОТСКОК ОТ БЕЗДНЫ", "Рынок в боковике. Цена у нижней границы.")
+        sl = price - atr * 0.8
+        tp = price + atr * 1.5
+        signal_info = (sl, tp, 55, "🟡 ОТСКОК ОТ БЕЗДНЫ", "Рынок в боковике. Цена у нижней границы.")
 
     # 3. СКРЫТЫЙ БЫК
     elif (last["close"] < prev["close"] and last["rsi"] > prev["rsi"] and 
           last["rsi"] < 50 and last["volume_ratio"] > 1.0):
-        if not is_strategy_blocked("СКРЫТЫЙ"):
-            sl = price - atr * 1.0
-            tp = price + atr * 1.8
-            signal_info = (sl, tp, 60, "🐂 СКРЫТЫЙ БЫК", "Цена падает, но сила медведей иссякает.")
+        sl = price - atr * 1.0
+        tp = price + atr * 1.8
+        signal_info = (sl, tp, 60, "🐂 СКРЫТЫЙ БЫК", "Цена падает, но сила медведей иссякает.")
 
     # 4. КИТ
     elif (last["close"] < last["open"] and last["volume_ratio"] > 2.5 and 
           last["low"] > prev["low"]):
-        if not is_strategy_blocked("КИТ"):
-            sl = price - atr * 0.5
-            tp = price + atr * 1.5
-            signal_info = (sl, tp, 70, "🐋 КИТ НА ОХОТЕ", "Кто-то крупный вытряхнул слабые руки.")
+        sl = price - atr * 0.5
+        tp = price + atr * 1.5
+        signal_info = (sl, tp, 70, "🐋 КИТ НА ОХОТЕ", "Кто-то крупный вытряхнул слабые руки.")
 
     # 5. КРЕСТ
     elif (prev["ema20"] <= prev["ema50"] and last["ema20"] > last["ema50"] and 
           last["volume_ratio"] > 1.0):
-        if not is_strategy_blocked("КРЕСТ"):
-            sl = price - atr * 1.5
-            tp = price + atr * 2.0
-            signal_info = (sl, tp, 75, "✝️ ЗОЛОТОЙ КРЕСТ", "Быстрая EMA пересекла медленную вверх.")
+        sl = price - atr * 1.5
+        tp = price + atr * 2.0
+        signal_info = (sl, tp, 75, "✝️ ЗОЛОТОЙ КРЕСТ", "Быстрая EMA пересекла медленную вверх.")
 
     if not signal_info: return None
 
@@ -397,12 +328,11 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
 
     rr = abs(tp - price) / abs(price - sl) if abs(price - sl) > 0 else 0
     btc_corr = get_btc_correlation(symbol)
-    pattern = detect_candle_pattern(df)
     
     return {
         "symbol": symbol, "signal": "BUY", "price": price, "tp": tp, "sl": sl,
         "score": score, "rsi": last["rsi"], "volume_ratio": last["volume_ratio"],
-        "rr": rr, "time": datetime.now(), "atr": atr, "btc_corr": btc_corr, "pattern": pattern,
+        "rr": rr, "time": datetime.now(), "atr": atr, "btc_corr": btc_corr,
         "strategy": strat_name, "strategy_desc": strat_desc
     }
 
@@ -435,7 +365,7 @@ def format_signal(s):
 🛑 СТОП: {s['sl']:.6f}
 
 📊 RSI: {s['rsi']:.1f} | Объём: x{s['volume_ratio']:.2f}
-⚖️ Риск/Прибыль: 1:{s['rr']:.2f}{corr_line}{personality}{s.get('pattern', '')}
+⚖️ Риск/Прибыль: 1:{s['rr']:.2f}{corr_line}{personality}
 ⏰ {s['time'].strftime('%H:%M:%S')}
 """
 
@@ -487,10 +417,9 @@ def get_pending_predictions():
     return pending[:3]
 
 async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
-    global WEEKLY_STATS, CONSECUTIVE_LOSSES, ANTI_TILT_BLOCKS
+    global WEEKLY_STATS, CONSECUTIVE_LOSSES
     if not ACTIVE_SIGNALS: return
     for sid, s in list(ACTIVE_SIGNALS.items()):
-        # Пропускаем сделки младше 1 минуты (чтобы не срабатывало на микро-колебаниях)
         if datetime.now() - s['time'] < timedelta(minutes=1): continue
         try:
             resp = session.get_tickers(category="spot", symbol=s["symbol"])
@@ -504,21 +433,21 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
             emoji = "✅" if is_tp else "❌"
             act = "Тейк-профиту" if is_tp else "Стоп-лоссу"
             
-            # Анти-тильт логика
+            # Анти-тильт логика (ТОЛЬКО СЧЕТЧИК, БЕЗ БЛОКИРОВКИ)
             if not is_tp:
                 strat_key = None
                 if "ПРОБОЙ" in s['strategy']: strat_key = "ПРОБОЙ"
                 elif "ОТСКОК" in s['strategy']: strat_key = "ОТСКОК"
                 if strat_key:
                     CONSECUTIVE_LOSSES[strat_key] += 1
-                    if CONSECUTIVE_LOSSES[strat_key] >= 3:
-                        ANTI_TILT_BLOCKS[strat_key] = datetime.now() + timedelta(hours=2)
-                        await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"💀 **АНТИ-ТИЛЬТ**\nСтратегия **{strat_key}** дала 3 убытка подряд.\nЯ заблокировал её на 2 часа. Иди пить чай.")
+                    if CONSECUTIVE_LOSSES[strat_key] == 3:
+                        # Отправляем мотивационное сообщение, но НЕ БЛОКИРУЕМ
+                        await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"💀 **ТРИ УДАРА**\nСтратегия **{strat_key}** дала 3 убытка подряд.\n{get_phrase('tilt_warning')}")
+                    elif CONSECUTIVE_LOSSES[strat_key] > 3:
                         CONSECUTIVE_LOSSES[strat_key] = 0
             else:
                 for key in CONSECUTIVE_LOSSES: CONSECUTIVE_LOSSES[key] = 0
 
-            # Сохраняем в историю АВТОМАТИЧЕСКИ
             history_file = HISTORY_FILE
             history = {}
             if history_file.exists():
@@ -662,19 +591,6 @@ async def full_summary_loop(context):
         try:
             market = get_market_summary()
             clusters = get_cluster_analysis()
-            dxy_val = get_dxy()
-            if dxy_val:
-                dxy_num = float(dxy_val.replace("💵 **DXY:** ", ""))
-                if dxy_num > 105: dxy_text = f"{dxy_val} (высокий, давит на крипту)"
-                elif dxy_num < 100: dxy_text = f"{dxy_val} (низкий, попутный ветер для крипты)"
-                else: dxy_text = f"{dxy_val} (нейтральный)"
-            else: dxy_text = ""
-            oi = get_open_interest()
-            btc_pattern = ""
-            btc_df = get_klines("BTCUSDT", "15", 3)
-            if btc_df is not None:
-                pattern = detect_candle_pattern(btc_df)
-                if pattern: btc_pattern = f"\n🕯️ **СВЕЧНОЙ ПАТТЕРН (BTC):** {pattern}\n"
             pending = get_pending_predictions()
             signals = []
             for sym in get_top_symbols(15):
@@ -682,7 +598,7 @@ async def full_summary_loop(context):
                 if s:
                     signals.append(s)
                     if len(signals) >= 3: break
-            report = f"📊 **АВТО-СВОДКА** ({now.strftime('%H:%M')})\n\n{market}\n\n{clusters if clusters else ''}\n{dxy_text if dxy_text else ''}\n{oi if oi else ''}{btc_pattern}"
+            report = f"📊 **АВТО-СВОДКА** ({now.strftime('%H:%M')})\n\n{market}\n\n{clusters if clusters else ''}"
             if pending:
                 report += "\n🧠 **ПРОГНОЗЫ НА ПРОВЕРКЕ:**\n"
                 for p in pending: report += f"• {p['symbol']}: жду {p['direction']} до ${p['target']:.4f} (осталось {p['time_left']})\n"
@@ -753,15 +669,14 @@ async def stop_reminder(context):
         if progress >= 0.3 and not s.get("trailing_advised"):
             s["trailing_advised"] = True
             atr = s.get('atr', 0)
-            # Безопасный безубыток = цена входа - 0.2 * ATR (но не ниже первоначального стопа)
             safe_sl = s['price'] - (atr * 0.2)
-            safe_sl = max(safe_sl, s['sl']) # Не даем опустить ниже аварийного стопа
+            safe_sl = max(safe_sl, s['sl'])
             await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"📈 **УМНЫЙ БЕЗУБЫТОК**\n{s['symbol']} в плюсе.\n💡 Подтяни стоп до **{safe_sl:.4f}** (зазор от входа {s['price'] - safe_sl:.4f}).")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v30.1\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v30.2\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}\nАнти-тильт: только советы", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -775,19 +690,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = await update.message.reply_text("📊 Формирую...")
             market = get_market_summary()
             clusters = get_cluster_analysis()
-            dxy_val = get_dxy()
-            if dxy_val:
-                dxy_num = float(dxy_val.replace("💵 **DXY:** ", ""))
-                if dxy_num > 105: dxy_text = f"{dxy_val} (высокий, давит на крипту)"
-                elif dxy_num < 100: dxy_text = f"{dxy_val} (низкий, попутный ветер для крипты)"
-                else: dxy_text = f"{dxy_val} (нейтральный)"
-            else: dxy_text = ""
-            oi = get_open_interest()
-            btc_pattern = ""
-            btc_df = get_klines("BTCUSDT", "15", 3)
-            if btc_df is not None:
-                pattern = detect_candle_pattern(btc_df)
-                if pattern: btc_pattern = f"\n🕯️ **СВЕЧНОЙ ПАТТЕРН (BTC):** {pattern}\n"
             pending = get_pending_predictions()
             signals = []
             for sym in get_top_symbols(15):
@@ -795,7 +697,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if s:
                     signals.append(s)
                     if len(signals) >= 3: break
-            report = f"📊 **СВОДКА**\n\n{market}\n\n{clusters if clusters else ''}\n{dxy_text if dxy_text else ''}\n{oi if oi else ''}{btc_pattern}"
+            report = f"📊 **СВОДКА**\n\n{market}\n\n{clusters if clusters else ''}"
             if pending:
                 report += "\n🧠 **ПРОГНОЗЫ НА ПРОВЕРКЕ:**\n"
                 for p in pending: report += f"• {p['symbol']}: жду {p['direction']} до ${p['target']:.4f} (осталось {p['time_left']})\n"
@@ -867,7 +769,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v30.1 (Телохранитель)")
+    print("🌙 TradeSight Pro WHISPER v30.2 (Свободный Художник)")
     print("="*60)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -878,20 +780,15 @@ def main():
     app.job_queue.run_repeating(full_summary_loop, interval=300, first=30)
     app.job_queue.run_repeating(auto_scan_loop, interval=300, first=60)
     app.job_queue.run_repeating(emergency_check, interval=300, first=90)
-    
-    # ГЛАВНОЕ ИЗМЕНЕНИЕ: ДВЕ ОЧЕРЕДИ ПРОВЕРОК
-    # 1. "Пристальное внимание": проверка каждую 1 минуту (для сделок младше 15 минут)
     app.job_queue.run_repeating(check_active_trades, interval=60, first=120, name="fast_check")
-    # 2. "Обычный режим": проверка каждые 5 минут (для сделок старше 15 минут) - этот цикл просто будет пропускать старые сделки быстрее
     app.job_queue.run_repeating(check_active_trades, interval=300, first=120, name="slow_check")
-    
     app.job_queue.run_repeating(evening_ritual, interval=60, first=150)
     app.job_queue.run_repeating(stop_reminder, interval=60, first=30)
     app.job_queue.run_repeating(check_predictions, interval=900, first=180)
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
     app.job_queue.run_repeating(weekday_heatmap, interval=3600, first=300)
-    print("🌙 Телохранитель запущен. Режим пристального внимания активен (первые 15 мин).")
+    print("🌙 Свободный Художник запущен. Без блокировок, с мотивацией.")
     app.run_polling()
 
 if __name__ == "__main__":
