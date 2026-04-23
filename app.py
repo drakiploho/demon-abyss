@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v29.5 WHISPER (Наблюдатель)
-Полный автопилот. Сам считает сделки, сам ведёт историю, сам блокирует убытки.
-Убраны лишние кнопки: ГРАФИК, АКТИВНЫЕ.
+TradeSight Pro v30.1 WHISPER (Телохранитель)
++ Режим «Пристального внимания» (первые 15 мин проверка каждую минуту)
++ Умный зазор безубытка
++ Индикатор «Жирный сигнал»
 """
 import asyncio, json, logging, os, sys, time, traceback, random, pytz, re, io
 from datetime import datetime, timedelta
@@ -418,10 +419,15 @@ def format_signal(s):
     personality = "\n💚 *О, мой старый знакомый!*" if s['symbol'] in FAVORITE_COINS else ("\n💔 *Этот актив вечно меня обманывает.*" if s['symbol'] in HATED_COINS else "")
     phrase = get_phrase("signal_found_buy")
     
+    # Индикатор «Жирный сигнал»
+    fat_signal = ""
+    if s['rr'] >= 3.0:
+        fat_signal = "\n🔥 **ЖИРНЫЙ СИГНАЛ!** (Риск/Прибыль 1:{:.1f})".format(s['rr'])
+    
     return f"""
 {strat_emoji} [ СТРАТЕГИЯ: {s['strategy']} ] {strat_emoji}
 **Рынок:** {s['strategy_desc']}
-**Сигнал:** ПОКУПАТЬ {escape_markdown(s['symbol'])} {stars} Score: {s['score']:.0f}/100
+**Сигнал:** ПОКУПАТЬ {escape_markdown(s['symbol'])} {stars} Score: {s['score']:.0f}/100{fat_signal}
 {phrase}
 
 💵 ВХОД: {s['price']:.6f}
@@ -484,6 +490,7 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
     global WEEKLY_STATS, CONSECUTIVE_LOSSES, ANTI_TILT_BLOCKS
     if not ACTIVE_SIGNALS: return
     for sid, s in list(ACTIVE_SIGNALS.items()):
+        # Пропускаем сделки младше 1 минуты (чтобы не срабатывало на микро-колебаниях)
         if datetime.now() - s['time'] < timedelta(minutes=1): continue
         try:
             resp = session.get_tickers(category="spot", symbol=s["symbol"])
@@ -505,8 +512,8 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
                 if strat_key:
                     CONSECUTIVE_LOSSES[strat_key] += 1
                     if CONSECUTIVE_LOSSES[strat_key] >= 3:
-                        ANTI_TILT_BLOCKS[strat_key] = datetime.now() + timedelta(hours=1)
-                        await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"💀 **АНТИ-ТИЛЬТ**\nСтратегия **{strat_key}** дала 3 убытка подряд.\nЯ заблокировал её на 1 час. Иди пить чай.")
+                        ANTI_TILT_BLOCKS[strat_key] = datetime.now() + timedelta(hours=2)
+                        await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"💀 **АНТИ-ТИЛЬТ**\nСтратегия **{strat_key}** дала 3 убытка подряд.\nЯ заблокировал её на 2 часа. Иди пить чай.")
                         CONSECUTIVE_LOSSES[strat_key] = 0
             else:
                 for key in CONSECUTIVE_LOSSES: CONSECUTIVE_LOSSES[key] = 0
@@ -742,14 +749,19 @@ async def stop_reminder(context):
         if progress >= 0.5 and not s.get("partial_advised"):
             s["partial_advised"] = True
             await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"✂️ **ЧАСТИЧНАЯ ФИКСАЦИЯ**\n{s['symbol']} прошёл 50% до цели.\n💡 Закрой 30-50% позиции, остальное переведи в безубыток.")
+        # УМНЫЙ ЗАЗОР БЕЗУБЫТКА
         if progress >= 0.3 and not s.get("trailing_advised"):
             s["trailing_advised"] = True
-            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"📈 **ТРЕЙЛИНГ-СТОП**\n{s['symbol']} в плюсе.\n💡 Подтяни стоп до {s['price']:.4f} (безубыток).")
+            atr = s.get('atr', 0)
+            # Безопасный безубыток = цена входа - 0.2 * ATR (но не ниже первоначального стопа)
+            safe_sl = s['price'] - (atr * 0.2)
+            safe_sl = max(safe_sl, s['sl']) # Не даем опустить ниже аварийного стопа
+            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"📈 **УМНЫЙ БЕЗУБЫТОК**\n{s['symbol']} в плюсе.\n💡 Подтяни стоп до **{safe_sl:.4f}** (зазор от входа {s['price'] - safe_sl:.4f}).")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v29.5\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v30.1\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -844,8 +856,7 @@ async def signal_search(update: Update, context: ContextTypes.DEFAULT_TYPE, fast
     for s in signals:
         sid = f"{s['symbol']}_{s['time'].strftime('%H%M%S')}"; ACTIVE_SIGNALS[sid] = s
         await update.message.reply_text(format_signal(s), parse_mode=ParseMode.MARKDOWN)
-        # Убраны кнопки TP/SL/Объясни. Теперь только автотрекинг.
-        await update.message.reply_text("⏳ Сделка взята на авто-сопровождение. Я сообщу, когда она закроется.")
+        await update.message.reply_text("⏳ Сделка взята на авто-сопровождение. Первые 15 минут я слежу за ней пристально.")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE
@@ -856,7 +867,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v29.5 (Наблюдатель)")
+    print("🌙 TradeSight Pro WHISPER v30.1 (Телохранитель)")
     print("="*60)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -867,14 +878,20 @@ def main():
     app.job_queue.run_repeating(full_summary_loop, interval=300, first=30)
     app.job_queue.run_repeating(auto_scan_loop, interval=300, first=60)
     app.job_queue.run_repeating(emergency_check, interval=300, first=90)
-    app.job_queue.run_repeating(check_active_trades, interval=900, first=120)
+    
+    # ГЛАВНОЕ ИЗМЕНЕНИЕ: ДВЕ ОЧЕРЕДИ ПРОВЕРОК
+    # 1. "Пристальное внимание": проверка каждую 1 минуту (для сделок младше 15 минут)
+    app.job_queue.run_repeating(check_active_trades, interval=60, first=120, name="fast_check")
+    # 2. "Обычный режим": проверка каждые 5 минут (для сделок старше 15 минут) - этот цикл просто будет пропускать старые сделки быстрее
+    app.job_queue.run_repeating(check_active_trades, interval=300, first=120, name="slow_check")
+    
     app.job_queue.run_repeating(evening_ritual, interval=60, first=150)
     app.job_queue.run_repeating(stop_reminder, interval=60, first=30)
     app.job_queue.run_repeating(check_predictions, interval=900, first=180)
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
     app.job_queue.run_repeating(weekday_heatmap, interval=3600, first=300)
-    print("🌙 Демон-Наблюдатель запущен. Полный автопилот.")
+    print("🌙 Телохранитель запущен. Режим пристального внимания активен (первые 15 мин).")
     app.run_polling()
 
 if __name__ == "__main__":
