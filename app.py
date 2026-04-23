@@ -4,7 +4,7 @@
 TradeSight Pro v30.3 WHISPER (Навигатор)
 + Сигналы с указанием сектора (например, MNTUSDT (L2))
 + Расширенный словарь SECTORS для всех популярных монет
-+ Сводка и Сигналы теперь говорят на одном языке
++ Исправлены ошибки синтаксиса
 """
 import asyncio, json, logging, os, sys, time, traceback, random, pytz, re, io
 from datetime import datetime, timedelta
@@ -116,7 +116,7 @@ LESSONS = [
     {"title": "🎯 ATR", "text": "ATR показывает волатильность.", "use": "Ставь стоп-лосс на расстоянии 1.5-2 ATR от входа."}
 ]
 
-# ⚡️ НОВЫЙ РАСШИРЕННЫЙ СЛОВАРЬ СЕКТОРОВ
+# ⚡️ РАСШИРЕННЫЙ СЛОВАРЬ СЕКТОРОВ
 SECTORS = {
     "Layer-1": ["BTC","ETH","SOL","ADA","AVAX","DOT","NEAR","ALGO","ATOM","FTM","INJ","ICP","APT","SUI","SEI","TIA","TON"],
     "DeFi": ["UNI","AAVE","MKR","SNX","COMP","CRV","SUSHI","LDO","GMX","HYPE","JUP","JTO","RAY","DYDX","1INCH"],
@@ -356,7 +356,7 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
         "score": score, "rsi": last["rsi"], "volume_ratio": last["volume_ratio"],
         "rr": rr, "time": datetime.now(), "atr": atr, "btc_corr": btc_corr,
         "strategy": strat_name, "strategy_desc": strat_desc,
-        "sector": get_sector_for_symbol(symbol) # <-- НОВОЕ ПОЛЕ
+        "sector": get_sector_for_symbol(symbol)
     }
 
 def format_signal(s):
@@ -372,12 +372,10 @@ def format_signal(s):
     personality = "\n💚 *О, мой старый знакомый!*" if s['symbol'] in FAVORITE_COINS else ("\n💔 *Этот актив вечно меня обманывает.*" if s['symbol'] in HATED_COINS else "")
     phrase = get_phrase("signal_found_buy")
     
-    # Индикатор «Жирный сигнал»
     fat_signal = ""
     if s['rr'] >= 3.0:
         fat_signal = "\n🔥 **ЖИРНЫЙ СИГНАЛ!** (Риск/Прибыль 1:{:.1f})".format(s['rr'])
     
-    # Добавляем сектор
     sector_str = f" ({s.get('sector', 'Other')})" if s.get('sector') else ""
     
     return f"""
@@ -459,7 +457,6 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
             emoji = "✅" if is_tp else "❌"
             act = "Тейк-профиту" if is_tp else "Стоп-лоссу"
             
-            # Анти-тильт логика (ТОЛЬКО СЧЕТЧИК, БЕЗ БЛОКИРОВКИ)
             if not is_tp:
                 strat_key = None
                 if "ПРОБОЙ" in s['strategy']: strat_key = "ПРОБОЙ"
@@ -482,9 +479,11 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
                     history = {}
             s["status"] = "tp" if is_tp else "sl"
             s["closed_time"] = datetime.now().isoformat()
-            s["exit_price"] = cur            s["pnl"] = pnl
+            s["exit_price"] = cur
+            s["pnl"] = pnl
             history[sid] = s
-            with open(history_file, 'w') as f: json.dump(history, f, indent=2)
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=2)
             
             WEEKLY_STATS["user_trades"] += 1
             if is_tp: WEEKLY_STATS["user_wins"] += 1
@@ -692,7 +691,6 @@ async def stop_reminder(context):
         if progress >= 0.5 and not s.get("partial_advised"):
             s["partial_advised"] = True
             await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"✂️ **ЧАСТИЧНАЯ ФИКСАЦИЯ**\n{s['symbol']} прошёл 50% до цели.\n💡 Закрой 30-50% позиции, остальное переведи в безубыток.")
-        # УМНЫЙ ЗАЗОР БЕЗУБЫТКА
         if progress >= 0.3 and not s.get("trailing_advised"):
             s["trailing_advised"] = True
             atr = s.get('atr', 0)
