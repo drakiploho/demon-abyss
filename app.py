@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v30.2 WHISPER (Свободный Художник)
-Убрана блокировка Анти-тильта. Только советы и поток сигналов.
-+ Умный зазор безубытка, Жирные сигналы, Пристальное внимание (1 мин).
+TradeSight Pro v30.3 WHISPER (Навигатор)
++ Сигналы с указанием сектора (например, MNTUSDT (L2))
++ Расширенный словарь SECTORS для всех популярных монет
++ Сводка и Сигналы теперь говорят на одном языке
 """
 import asyncio, json, logging, os, sys, time, traceback, random, pytz, re, io
 from datetime import datetime, timedelta
@@ -115,11 +116,32 @@ LESSONS = [
     {"title": "🎯 ATR", "text": "ATR показывает волатильность.", "use": "Ставь стоп-лосс на расстоянии 1.5-2 ATR от входа."}
 ]
 
+# ⚡️ НОВЫЙ РАСШИРЕННЫЙ СЛОВАРЬ СЕКТОРОВ
 SECTORS = {
-    "Layer-1": ["BTC","ETH","SOL","ADA","AVAX","DOT","NEAR","ALGO"], "DeFi": ["UNI","AAVE","MKR","SNX","COMP","CRV","SUSHI"],
-    "AI": ["FET","AGIX","OCEAN","RNDR","TAO","WLD"], "Meme": ["DOGE","SHIB","PEPE","BONK","WIF","FLOKI"],
-    "Gaming": ["IMX","GALA","SAND","MANA","AXS","ENJ"], "L2": ["MATIC","ARB","OP","STRK","ZKS","METIS"]
+    "Layer-1": ["BTC","ETH","SOL","ADA","AVAX","DOT","NEAR","ALGO","ATOM","FTM","INJ","ICP","APT","SUI","SEI","TIA","TON"],
+    "DeFi": ["UNI","AAVE","MKR","SNX","COMP","CRV","SUSHI","LDO","GMX","HYPE","JUP","JTO","RAY","DYDX","1INCH"],
+    "AI": ["FET","AGIX","OCEAN","RNDR","TAO","WLD","AKT","CTXC"],
+    "Meme": ["DOGE","SHIB","PEPE","BONK","WIF","FLOKI","PEOPLE","TURBO","MYRO","SAMO"],
+    "Gaming": ["IMX","GALA","SAND","MANA","AXS","ENJ","BEAM","PIXEL","NAKA"],
+    "L2": ["MATIC","ARB","OP","STRK","ZKS","METIS","MNT","SCROLL","BLAST"],
+    "Infrastructure": ["LINK","GRT","BAND","TRB","PYTH"],
+    "Payments": ["XRP","XLM","ALGO"],
+    "Exchange": ["BNB","OKB","BGB","LEO"],
+    "Storage": ["FIL","AR","STORJ"],
+    "GambleFi": ["RLB","WIN","FUN"],
+    "RWA": ["ONDO","TRU","SNX"],
+    "Derivatives": ["DYDX","GMX","GNS"],
+    "Launchpad": ["SUPER","SNFT","TKO"],
+    "Metaverse": ["RENDER","WEMIX","MBOX","ILV"]
 }
+
+def get_sector_for_symbol(symbol):
+    """Определяет сектор монеты."""
+    coin = symbol.replace("USDT", "")
+    for sector, coins in SECTORS.items():
+        if coin in coins:
+            return sector
+    return "Other"
 
 def is_sleep_time():
     msk = pytz.timezone('Europe/Moscow'); now = datetime.now(msk)
@@ -333,7 +355,8 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
         "symbol": symbol, "signal": "BUY", "price": price, "tp": tp, "sl": sl,
         "score": score, "rsi": last["rsi"], "volume_ratio": last["volume_ratio"],
         "rr": rr, "time": datetime.now(), "atr": atr, "btc_corr": btc_corr,
-        "strategy": strat_name, "strategy_desc": strat_desc
+        "strategy": strat_name, "strategy_desc": strat_desc,
+        "sector": get_sector_for_symbol(symbol) # <-- НОВОЕ ПОЛЕ
     }
 
 def format_signal(s):
@@ -354,10 +377,13 @@ def format_signal(s):
     if s['rr'] >= 3.0:
         fat_signal = "\n🔥 **ЖИРНЫЙ СИГНАЛ!** (Риск/Прибыль 1:{:.1f})".format(s['rr'])
     
+    # Добавляем сектор
+    sector_str = f" ({s.get('sector', 'Other')})" if s.get('sector') else ""
+    
     return f"""
 {strat_emoji} [ СТРАТЕГИЯ: {s['strategy']} ] {strat_emoji}
 **Рынок:** {s['strategy_desc']}
-**Сигнал:** ПОКУПАТЬ {escape_markdown(s['symbol'])} {stars} Score: {s['score']:.0f}/100{fat_signal}
+**Сигнал:** ПОКУПАТЬ {escape_markdown(s['symbol'])}{sector_str} {stars} Score: {s['score']:.0f}/100{fat_signal}
 {phrase}
 
 💵 ВХОД: {s['price']:.6f}
@@ -441,7 +467,6 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
                 if strat_key:
                     CONSECUTIVE_LOSSES[strat_key] += 1
                     if CONSECUTIVE_LOSSES[strat_key] == 3:
-                        # Отправляем мотивационное сообщение, но НЕ БЛОКИРУЕМ
                         await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"💀 **ТРИ УДАРА**\nСтратегия **{strat_key}** дала 3 убытка подряд.\n{get_phrase('tilt_warning')}")
                     elif CONSECUTIVE_LOSSES[strat_key] > 3:
                         CONSECUTIVE_LOSSES[strat_key] = 0
@@ -451,11 +476,13 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
             history_file = HISTORY_FILE
             history = {}
             if history_file.exists():
-                with open(history_file, 'r') as f: history = json.load(f)
+                try:
+                    with open(history_file, 'r') as f: history = json.load(f)
+                except:
+                    history = {}
             s["status"] = "tp" if is_tp else "sl"
             s["closed_time"] = datetime.now().isoformat()
-            s["exit_price"] = cur
-            s["pnl"] = pnl
+            s["exit_price"] = cur            s["pnl"] = pnl
             history[sid] = s
             with open(history_file, 'w') as f: json.dump(history, f, indent=2)
             
@@ -604,7 +631,7 @@ async def full_summary_loop(context):
                 for p in pending: report += f"• {p['symbol']}: жду {p['direction']} до ${p['target']:.4f} (осталось {p['time_left']})\n"
             if signals:
                 report += f"\n🟢 **ТОП-{len(signals)} СИГНАЛОВ:**\n"
-                for s in signals: report += f"• {s['symbol']} | {s['strategy']} | Score {s['score']:.0f} | ${s['price']:.4f} → ${s['tp']:.4f}\n"
+                for s in signals: report += f"• {s['symbol']} ({s.get('sector', 'Other')}) | {s['strategy']} | Score {s['score']:.0f} | ${s['price']:.4f} → ${s['tp']:.4f}\n"
             else: report += f"\n{get_phrase('signal_fail')}"
             await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=report, parse_mode=ParseMode.MARKDOWN)
         except: pass
@@ -676,7 +703,7 @@ async def stop_reminder(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v30.2\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}\nАнти-тильт: только советы", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v30.3\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}\nНавигатор: сигналы с секторами", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -703,7 +730,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for p in pending: report += f"• {p['symbol']}: жду {p['direction']} до ${p['target']:.4f} (осталось {p['time_left']})\n"
             if signals:
                 report += f"\n🟢 **ТОП-{len(signals)} СИГНАЛОВ:**\n"
-                for s in signals: report += f"• {s['symbol']} | {s['strategy']} | Score {s['score']:.0f} | ${s['price']:.4f} → ${s['tp']:.4f}\n"
+                for s in signals: report += f"• {s['symbol']} ({s.get('sector', 'Other')}) | {s['strategy']} | Score {s['score']:.0f} | ${s['price']:.4f} → ${s['tp']:.4f}\n"
             else: report += f"\n{get_phrase('signal_fail')}"
             await msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
         elif text == "🔥 СИГНАЛЫ": await signal_search(update, context, fast=False)
@@ -722,7 +749,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not HISTORY_FILE.exists():
                 await update.message.reply_text("🌫️ История пуста.")
                 return
-            with open(HISTORY_FILE, 'r') as f: history = json.load(f)
+            try:
+                with open(HISTORY_FILE, 'r') as f: history = json.load(f)
+            except:
+                await update.message.reply_text("🌫️ Файл истории повреждён. Он будет пересоздан.")
+                with open(HISTORY_FILE, 'w') as f: json.dump({}, f)
+                return
             recent = list(history.items())[-5:]
             msg = "🌫️ **ИСТОРИЯ (авто)**\n\n"
             for sid, s in reversed(recent):
@@ -769,7 +801,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v30.2 (Свободный Художник)")
+    print("🌙 TradeSight Pro WHISPER v30.3 (Навигатор)")
     print("="*60)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -788,7 +820,7 @@ def main():
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
     app.job_queue.run_repeating(weekday_heatmap, interval=3600, first=300)
-    print("🌙 Свободный Художник запущен. Без блокировок, с мотивацией.")
+    print("🌙 Навигатор запущен. Сектора и сигналы объединены.")
     app.run_polling()
 
 if __name__ == "__main__":
