@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v29.0 WHISPER (Аналитик)
-+ Анти-тильт, Итоги дня, Тепловая карта, Монета дня, Автотрекинг сделок.
+TradeSight Pro v29.5 WHISPER (Наблюдатель)
+Полный автопилот. Сам считает сделки, сам ведёт историю, сам блокирует убытки.
+Убраны лишние кнопки: ГРАФИК, АКТИВНЫЕ.
 """
 import asyncio, json, logging, os, sys, time, traceback, random, pytz, re, io
 from datetime import datetime, timedelta
@@ -20,13 +21,11 @@ try:
     from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
     from telegram.constants import ParseMode
-    import matplotlib.pyplot as plt
 except ImportError as e:
     print(f"❌ {e}")
     os.system(f"{sys.executable} -m pip install pandas ta pybit python-telegram-bot pytz requests matplotlib")
     sys.exit(0)
 
-# ========== УВЕДОМЛЕНИЯ ОБ ОШИБКАХ ==========
 async def notify_error(context: ContextTypes.DEFAULT_TYPE, error_msg: str):
     try:
         if TELEGRAM_CHAT_ID:
@@ -43,7 +42,6 @@ DATA_DIR.mkdir(exist_ok=True)
 SETTINGS_FILE = DATA_DIR / "settings.json"
 PREDICTIONS_FILE = DATA_DIR / "predictions.json"
 STATS_PREDICT_FILE = DATA_DIR / "stats_predictions.json"
-WHALE_PREDICT_FILE = DATA_DIR / "whale_predictions.json"
 MEMORY_FILE = DATA_DIR / "memory.json"
 HISTORY_FILE = DATA_DIR / "history.json"
 ANTI_TILT_FILE = DATA_DIR / "anti_tilt.json"
@@ -121,7 +119,6 @@ LESSONS = [
 CANDLE_PATTERNS = {
     "doji": {"name": "Доджи", "desc": "Нерешительность рынка.", "action": "Жди подтверждения."},
     "hammer": {"name": "Молот", "desc": "Бычий разворот.", "action": "Присмотрись к покупкам."},
-    "hanging_man": {"name": "Повешенный", "desc": "Медвежий разворот.", "action": "Будь осторожен с покупками."},
     "bullish_engulfing": {"name": "Бычье поглощение", "desc": "Покупатели перехватили инициативу.", "action": "Отличный сигнал для лонга."},
     "bearish_engulfing": {"name": "Медвежье поглощение", "desc": "Продавцы перехватили инициативу.", "action": "Отличный сигнал для шорта."}
 }
@@ -153,7 +150,7 @@ def get_btc_correlation(symbol: str) -> float:
         return ret_btc.loc[idx].corr(ret_sym.loc[idx]) if len(idx) >= 30 else 0.0
     except: return 0.0
 
-MAIN_KEYBOARD = ReplyKeyboardMarkup([["📊 СВОДКА", "🔥 СИГНАЛЫ"], ["⏳ АКТИВНЫЕ", "📚 ОБУЧЕНИЕ"], ["📈 ГРАФИК", "⚡ СКАЛЬП"], ["⚙️ ЕЩЁ"]], resize_keyboard=True)
+MAIN_KEYBOARD = ReplyKeyboardMarkup([["📊 СВОДКА", "🔥 СИГНАЛЫ"], ["📚 ОБУЧЕНИЕ", "⚡ СКАЛЬП"], ["⚙️ ЕЩЁ"]], resize_keyboard=True)
 MORE_KEYBOARD = ReplyKeyboardMarkup([["📆 ИТОГИ ДНЯ", "🌫️ ИСТОРИЯ"], ["🧠 СТАТ ПРОГНОЗОВ", "⚙️ СТРОГОСТЬ"], ["🔇 ТИХО", "🔙 НАЗАД"]], resize_keyboard=True)
 
 def load_predictions(): return json.load(open(PREDICTIONS_FILE, 'r')) if PREDICTIONS_FILE.exists() else []
@@ -303,30 +300,6 @@ def calculate_indicators(df):
     df["bb_lower"] = bb.bollinger_lband()
     df["bb_upper"] = bb.bollinger_hband()
     return df
-
-def generate_chart(symbol: str) -> Optional[io.BytesIO]:
-    df = get_klines(symbol, "15", 100)
-    if df is None or len(df) < 30: return None
-    try:
-        resp = session.get_tickers(category="spot", symbol=symbol)
-        if resp.get("retCode") == 0:
-            t = resp["result"]["list"][0]; cur = float(t["lastPrice"]); ch = float(t.get("price24hPcnt", 0)) * 100
-        else: cur, ch = df.iloc[-1]["close"], 0
-    except: cur, ch = df.iloc[-1]["close"], 0
-    df = calculate_indicators(df)
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
-    fig.patch.set_facecolor('#1a1a2e'); ax1.set_facecolor('#1a1a2e'); ax2.set_facecolor('#1a1a2e')
-    ax1.plot(df.index, df["close"], color='#00ff88', linewidth=1.5, label='Цена')
-    ax1.plot(df.index, df["ema20"], color='#ffcc00', linewidth=1, label='EMA20')
-    ax1.plot(df.index, df["ema50"], color='#3399ff', linewidth=1, label='EMA50')
-    ax1.set_title(f'{symbol} | ${cur:.4f} {"🟢" if ch>0 else "🔴"} {ch:+.2f}% за 24ч', color='white', fontsize=14)
-    ax1.legend(loc='upper left', facecolor='#1a1a2e', labelcolor='white'); ax1.tick_params(colors='white'); ax1.grid(True, alpha=0.3)
-    colors = ['#00ff88' if c >= o else '#ff4444' for c, o in zip(df['close'], df['open'])]
-    ax2.bar(df.index, df['volume'], color=colors, alpha=0.7, width=0.8)
-    ax2.set_ylabel('Объём', color='white'); ax2.tick_params(colors='white'); ax2.grid(True, alpha=0.3)
-    plt.tight_layout()
-    buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=100, facecolor='#1a1a2e'); buf.seek(0); plt.close()
-    return buf
 
 def detect_candle_pattern(df: pd.DataFrame) -> str:
     if df is None or len(df) < 3: return ""
@@ -538,6 +511,7 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
             else:
                 for key in CONSECUTIVE_LOSSES: CONSECUTIVE_LOSSES[key] = 0
 
+            # Сохраняем в историю АВТОМАТИЧЕСКИ
             history_file = HISTORY_FILE
             history = {}
             if history_file.exists():
@@ -559,7 +533,7 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
 async def daily_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().date()
     if not HISTORY_FILE.exists():
-        await update.message.reply_text("📆 История сделок пуста.")
+        await update.message.reply_text("📆 История сделок пуста. Жди авто-закрытий.")
         return
     with open(HISTORY_FILE, 'r') as f: history = json.load(f)
     day_trades = []
@@ -568,7 +542,7 @@ async def daily_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ct = datetime.fromisoformat(s['closed_time']).date()
         if ct == today: day_trades.append(s)
     if not day_trades:
-        await update.message.reply_text("📆 Сегодня сделок не было.")
+        await update.message.reply_text("📆 Сегодня сделок не было или они ещё не закрылись.")
         return
     wins = sum(1 for t in day_trades if t.get('status') == 'tp')
     losses = len(day_trades) - wins
@@ -775,7 +749,7 @@ async def stop_reminder(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v29.0\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v29.5\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -820,21 +794,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
         elif text == "🔥 СИГНАЛЫ": await signal_search(update, context, fast=False)
         elif text == "⚡ СКАЛЬП": await signal_search(update, context, fast=True)
-        elif text == "📈 ГРАФИК":
-            await update.message.reply_text("📈 Отправь монету, например: `BTCUSDT`")
-            context.user_data["waiting_for_chart"] = True
-        elif text == "⏳ АКТИВНЫЕ":
-            if not ACTIVE_SIGNALS: await update.message.reply_text("🌫️ Нет.")
-            else:
-                msg = "⏳ **АКТИВНЫЕ**\n\n"
-                for sid, s in ACTIVE_SIGNALS.items():
-                    try:
-                        resp = session.get_tickers(category="spot", symbol=s["symbol"])
-                        cur = float(resp["result"]["list"][0]["lastPrice"]) if resp.get("retCode") == 0 else s["price"]
-                    except: cur = s["price"]
-                    pnl = ((cur - s["price"]) / s["price"] * 100)
-                    msg += f"{'🟢' if pnl > 0 else '🔴'} {s['symbol']} | P&L: {pnl:+.2f}%\n"
-                await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
         elif text == "📚 ОБУЧЕНИЕ":
             l = random.choice(LESSONS)
             await update.message.reply_text(f"{get_phrase('lesson_intro')}\n\n📚 **{l['title']}**\n\n{l['text']}\n\n💡 **Как применять:** {l['use']}", parse_mode=ParseMode.MARKDOWN)
@@ -846,11 +805,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(news if news else "🌫️ Новостей нет.", parse_mode=ParseMode.MARKDOWN)
         elif text == "🧠 СТАТ ПРОГНОЗОВ": await update.message.reply_text(get_stats_message(), parse_mode=ParseMode.MARKDOWN)
         elif text == "🌫️ ИСТОРИЯ":
-            if not CLOSED_SIGNALS: await update.message.reply_text("🌫️ Пусто.")
-            else:
-                msg = "🌫️ **ИСТОРИЯ**\n\n"
-                for item in CLOSED_SIGNALS[-5:]: msg += f"{'✅' if item['result']=='tp' else '❌'} {item['symbol']} | {item['pnl']:+.2f}%\n"
-                await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+            if not HISTORY_FILE.exists():
+                await update.message.reply_text("🌫️ История пуста.")
+                return
+            with open(HISTORY_FILE, 'r') as f: history = json.load(f)
+            recent = list(history.items())[-5:]
+            msg = "🌫️ **ИСТОРИЯ (авто)**\n\n"
+            for sid, s in reversed(recent):
+                emoji = "✅" if s.get('status') == 'tp' else "❌"
+                msg += f"{emoji} {s['symbol']} | {s.get('pnl', 0):+.2f}%\n"
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
         elif text == "⚙️ СТРОГОСТЬ":
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"🟢 50", callback_data="score_50"), InlineKeyboardButton("🟡 60", callback_data="score_60"), InlineKeyboardButton("🔴 70", callback_data="score_70")]])
             await update.message.reply_text(f"Текущая: {MIN_SCORE}", reply_markup=kb)
@@ -858,17 +822,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SILENT_MODE = not SILENT_MODE; settings["SILENT_MODE"] = SILENT_MODE; save_settings(settings)
             await update.message.reply_text(f"🔇 Тихий режим: {'ВКЛ' if SILENT_MODE else 'ВЫКЛ'}")
         elif text == "🔙 НАЗАД": await update.message.reply_text("Главное меню", reply_markup=MAIN_KEYBOARD)
-        elif context.user_data.get("waiting_for_chart"):
-            symbol = text.strip().upper()
-            if not symbol.endswith("USDT"): symbol += "USDT"
-            msg = await update.message.reply_text(f"📈 Рисую график {symbol}...")
-            chart = generate_chart(symbol)
-            if chart:
-                caption = f"📈 **{symbol}** — 15-минутный график\n\n💡 **Как читать:**\n• 🟢 Зелёная линия — цена\n• 🟡 Жёлтая — EMA20, 🔵 Синяя — EMA50\n• Жёлтая выше синей = тренд вверх"
-                await update.message.reply_photo(photo=chart, caption=caption, parse_mode=ParseMode.MARKDOWN)
-                await msg.delete()
-            else: await msg.edit_text(f"🌫️ Не удалось получить данные для {symbol}")
-            context.user_data["waiting_for_chart"] = False
     except Exception as e: await notify_error(context, f"handle_message: {e}")
 
 async def signal_search(update: Update, context: ContextTypes.DEFAULT_TYPE, fast=False):
@@ -891,51 +844,19 @@ async def signal_search(update: Update, context: ContextTypes.DEFAULT_TYPE, fast
     for s in signals:
         sid = f"{s['symbol']}_{s['time'].strftime('%H%M%S')}"; ACTIVE_SIGNALS[sid] = s
         await update.message.reply_text(format_signal(s), parse_mode=ParseMode.MARKDOWN)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎯 TP", callback_data=f"tp_{sid}"), InlineKeyboardButton("🛑 SL", callback_data=f"sl_{sid}")], [InlineKeyboardButton("📘 Объясни", callback_data=f"explain_{sid}")]])
-        await update.message.reply_text("Выбери:", reply_markup=kb)
+        # Убраны кнопки TP/SL/Объясни. Теперь только автотрекинг.
+        await update.message.reply_text("⏳ Сделка взята на авто-сопровождение. Я сообщу, когда она закроется.")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global MIN_SCORE, WEEKLY_STATS, CONSECUTIVE_LOSSES, ANTI_TILT_BLOCKS
+    global MIN_SCORE
     q = update.callback_query; await q.answer(); d = q.data
     if d.startswith("score_"):
         MIN_SCORE = int(d.split("_")[1]); settings["MIN_SCORE"] = MIN_SCORE; save_settings(settings)
         await q.edit_message_text(f"✅ Строгость: {MIN_SCORE}")
-    elif d.startswith("explain_"):
-        sid = d.split("_", 1)[1]
-        if sid in ACTIVE_SIGNALS: await q.message.reply_text(generate_explanation(ACTIVE_SIGNALS[sid]), parse_mode=ParseMode.MARKDOWN)
-    elif d.startswith("tp_") or d.startswith("sl_"):
-        act, sid = d.split("_", 1)
-        if sid in ACTIVE_SIGNALS:
-            s = ACTIVE_SIGNALS[sid]
-            if act == "tp": pnl = abs(s["tp"] - s["price"]) / s["price"] * 100
-            else: pnl = -abs(s["sl"] - s["price"]) / s["price"] * 100
-            
-            # Анти-тильт
-            if act == "sl":
-                strat_key = None
-                if "ПРОБОЙ" in s['strategy']: strat_key = "ПРОБОЙ"
-                elif "ОТСКОК" in s['strategy']: strat_key = "ОТСКОК"
-                if strat_key:
-                    CONSECUTIVE_LOSSES[strat_key] += 1
-                    if CONSECUTIVE_LOSSES[strat_key] >= 3:
-                        ANTI_TILT_BLOCKS[strat_key] = datetime.now() + timedelta(hours=1)
-                        await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"💀 **АНТИ-ТИЛЬТ**\nСтратегия **{strat_key}** заблокирована на 1 час.")
-                        CONSECUTIVE_LOSSES[strat_key] = 0
-            else:
-                for key in CONSECUTIVE_LOSSES: CONSECUTIVE_LOSSES[key] = 0
-
-            CLOSED_SIGNALS.append({"symbol": s["symbol"], "result": "tp" if act=="tp" else "sl", "pnl": pnl, "time": datetime.now()})
-            if len(CLOSED_SIGNALS) > 10: CLOSED_SIGNALS.pop(0)
-            del ACTIVE_SIGNALS[sid]
-            WEEKLY_STATS["user_trades"] += 1
-            if pnl > 0: WEEKLY_STATS["user_wins"] += 1
-            WEEKLY_STATS["user_pnl"] += pnl
-            emoji = "✅" if act=="tp" else "❌"
-            await q.edit_message_text(f"{q.message.text}\n\n{emoji} Закрыто! P&L: {pnl:+.2f}%")
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v29.0 (Аналитик)")
+    print("🌙 TradeSight Pro WHISPER v29.5 (Наблюдатель)")
     print("="*60)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -953,7 +874,7 @@ def main():
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
     app.job_queue.run_repeating(weekday_heatmap, interval=3600, first=300)
-    print("🌙 Демон-Аналитик запущен. Анти-тильт активен.")
+    print("🌙 Демон-Наблюдатель запущен. Полный автопилот.")
     app.run_polling()
 
 if __name__ == "__main__":
