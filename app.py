@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v30.3 WHISPER (Навигатор)
-+ Сигналы с указанием сектора (например, MNTUSDT (L2))
-+ Расширенный словарь SECTORS для всех популярных монет
-+ Исправлены ошибки синтаксиса
+TradeSight Pro v31.0 WHISPER (Бухгалтер)
++ Тайм-аут сделки (6 часов) — не даёт сделкам "виснуть"
++ Починка "Умного безубытка" — советы приходят вовремя
++ Итоги дня теперь показывают реальную картину
 """
 import asyncio, json, logging, os, sys, time, traceback, random, pytz, re, io
 from datetime import datetime, timedelta
@@ -116,7 +116,6 @@ LESSONS = [
     {"title": "🎯 ATR", "text": "ATR показывает волатильность.", "use": "Ставь стоп-лосс на расстоянии 1.5-2 ATR от входа."}
 ]
 
-# ⚡️ РАСШИРЕННЫЙ СЛОВАРЬ СЕКТОРОВ
 SECTORS = {
     "Layer-1": ["BTC","ETH","SOL","ADA","AVAX","DOT","NEAR","ALGO","ATOM","FTM","INJ","ICP","APT","SUI","SEI","TIA","TON"],
     "DeFi": ["UNI","AAVE","MKR","SNX","COMP","CRV","SUSHI","LDO","GMX","HYPE","JUP","JTO","RAY","DYDX","1INCH"],
@@ -136,7 +135,6 @@ SECTORS = {
 }
 
 def get_sector_for_symbol(symbol):
-    """Определяет сектор монеты."""
     coin = symbol.replace("USDT", "")
     for sector, coins in SECTORS.items():
         if coin in coins:
@@ -440,9 +438,51 @@ def get_pending_predictions():
                 })
     return pending[:3]
 
-async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
+async def close_signal(context, sid, s, cur, reason):
+    """Закрывает сделку и записывает в историю."""
     global WEEKLY_STATS, CONSECUTIVE_LOSSES
+    is_tp = reason == "TP"
+    pnl = abs(cur - s["price"]) / s["price"] * 100 if is_tp else -abs(cur - s["price"]) / s["price"] * 100
+    
+    emoji = "✅" if is_tp else "❌"
+    
+    if not is_tp:
+        strat_key = None
+        if "ПРОБОЙ" in s['strategy']: strat_key = "ПРОБОЙ"
+        elif "ОТСКОК" in s['strategy']: strat_key = "ОТСКОК"
+        if strat_key:
+            CONSECUTIVE_LOSSES[strat_key] += 1
+            if CONSECUTIVE_LOSSES[strat_key] == 3:
+                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"💀 **ТРИ УДАРА**\nСтратегия **{strat_key}** дала 3 убытка подряд.\n{get_phrase('tilt_warning')}")
+            elif CONSECUTIVE_LOSSES[strat_key] > 3:
+                CONSECUTIVE_LOSSES[strat_key] = 0
+    else:
+        for key in CONSECUTIVE_LOSSES: CONSECUTIVE_LOSSES[key] = 0
+
+    history_file = HISTORY_FILE
+    history = {}
+    if history_file.exists():
+        try:
+            with open(history_file, 'r') as f: history = json.load(f)
+        except:
+            history = {}
+    s["status"] = "tp" if is_tp else "sl"
+    s["closed_time"] = datetime.now().isoformat()
+    s["exit_price"] = cur
+    s["pnl"] = pnl
+    history[sid] = s
+    with open(history_file, 'w') as f:
+        json.dump(history, f, indent=2)
+    
+    WEEKLY_STATS["user_trades"] += 1
+    if is_tp: WEEKLY_STATS["user_wins"] += 1
+    WEEKLY_STATS["user_pnl"] += pnl
+    
+    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"{emoji} **ЗАКРЫТИЕ** ({reason})\n{s['symbol']}\nВыход: ${cur:.4f}\nP&L: {pnl:+.2f}%")
+
+async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
     if not ACTIVE_SIGNALS: return
+    timeout = timedelta(hours=6)
     for sid, s in list(ACTIVE_SIGNALS.items()):
         if datetime.now() - s['time'] < timedelta(minutes=1): continue
         try:
@@ -450,46 +490,19 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
             if resp.get("retCode") != 0: continue
             cur = float(resp["result"]["list"][0]["lastPrice"])
         except: continue
+        
         is_tp = cur >= s["tp"] if s["signal"] == "BUY" else cur <= s["tp"]
         is_sl = cur <= s["sl"] if s["signal"] == "BUY" else cur >= s["sl"]
-        if is_tp or is_sl:
-            pnl = abs(cur - s["price"]) / s["price"] * 100 if is_tp else -abs(cur - s["price"]) / s["price"] * 100
-            emoji = "✅" if is_tp else "❌"
-            act = "Тейк-профиту" if is_tp else "Стоп-лоссу"
-            
-            if not is_tp:
-                strat_key = None
-                if "ПРОБОЙ" in s['strategy']: strat_key = "ПРОБОЙ"
-                elif "ОТСКОК" in s['strategy']: strat_key = "ОТСКОК"
-                if strat_key:
-                    CONSECUTIVE_LOSSES[strat_key] += 1
-                    if CONSECUTIVE_LOSSES[strat_key] == 3:
-                        await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"💀 **ТРИ УДАРА**\nСтратегия **{strat_key}** дала 3 убытка подряд.\n{get_phrase('tilt_warning')}")
-                    elif CONSECUTIVE_LOSSES[strat_key] > 3:
-                        CONSECUTIVE_LOSSES[strat_key] = 0
-            else:
-                for key in CONSECUTIVE_LOSSES: CONSECUTIVE_LOSSES[key] = 0
+        is_timeout = datetime.now() - s['time'] > timeout
 
-            history_file = HISTORY_FILE
-            history = {}
-            if history_file.exists():
-                try:
-                    with open(history_file, 'r') as f: history = json.load(f)
-                except:
-                    history = {}
-            s["status"] = "tp" if is_tp else "sl"
-            s["closed_time"] = datetime.now().isoformat()
-            s["exit_price"] = cur
-            s["pnl"] = pnl
-            history[sid] = s
-            with open(history_file, 'w') as f:
-                json.dump(history, f, indent=2)
-            
-            WEEKLY_STATS["user_trades"] += 1
-            if is_tp: WEEKLY_STATS["user_wins"] += 1
-            WEEKLY_STATS["user_pnl"] += pnl
-            
-            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"{emoji} **АВТОЗАКРЫТИЕ**\n{s['symbol']} по {act}\nP&L: {pnl:+.2f}%")
+        if is_tp:
+            await close_signal(context, sid, s, cur, "TP")
+            del ACTIVE_SIGNALS[sid]
+        elif is_sl:
+            await close_signal(context, sid, s, cur, "SL")
+            del ACTIVE_SIGNALS[sid]
+        elif is_timeout:
+            await close_signal(context, sid, s, cur, "TIMEOUT")
             del ACTIVE_SIGNALS[sid]
 
 async def daily_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -507,15 +520,15 @@ async def daily_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📆 Сегодня сделок не было или они ещё не закрылись.")
         return
     wins = sum(1 for t in day_trades if t.get('status') == 'tp')
-    losses = len(day_trades) - wins
+    losses = sum(1 for t in day_trades if t.get('status') in ['sl', 'timeout'])
     total_pnl = sum(t.get('pnl', 0) for t in day_trades)
     best = max(day_trades, key=lambda x: x.get('pnl', -999))
     worst = min(day_trades, key=lambda x: x.get('pnl', 999))
     msg = f"📆 **ИТОГИ ДНЯ** ({today.strftime('%d.%m.%Y')})\n\n"
     msg += f"📊 Сделок: {len(day_trades)}\n✅ Побед: {wins}\n❌ Поражений: {losses}\n"
     msg += f"💰 Чистый P&L: {total_pnl:+.2f}%\n\n"
-    msg += f"🏆 Лучшая: {best['symbol']} ({best.get('pnl', 0):+.2f}%)\n"
-    msg += f"💀 Худшая: {worst['symbol']} ({worst.get('pnl', 0):+.2f}%)\n\n"
+    if best: msg += f"🏆 Лучшая: {best['symbol']} ({best.get('pnl', 0):+.2f}%)\n"
+    if worst: msg += f"💀 Худшая: {worst['symbol']} ({worst.get('pnl', 0):+.2f}%)\n\n"
     msg += "💡 Совет: Продолжай вести дневник."
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -648,7 +661,31 @@ async def evening_ritual(context):
     msk = pytz.timezone('Europe/Moscow'); now = datetime.now(msk)
     if now.hour == 23 and now.minute == 0:
         update_mood("tired")
-        report = f"{get_phrase('evening')}\n\n🌙 **ИТОГИ ДНЯ**\n📊 Сигналов: {DAILY_STATS['signals_found']}\n🧠 Прогнозов: {DAILY_STATS['predictions_made']} (сбылось {DAILY_STATS['predictions_success']})"
+        # Подводим итоги
+        today = datetime.now().date()
+        day_trades = []
+        if HISTORY_FILE.exists():
+            try:
+                with open(HISTORY_FILE, 'r') as f: history = json.load(f)
+                for sid, s in history.items():
+                    if 'closed_time' not in s: continue
+                    ct = datetime.fromisoformat(s['closed_time']).date()
+                    if ct == today: day_trades.append(s)
+            except: pass
+        
+        total_pnl = sum(t.get('pnl', 0) for t in day_trades)
+        wins = sum(1 for t in day_trades if t.get('status') == 'tp')
+        losses = len(day_trades) - wins
+        active_count = len(ACTIVE_SIGNALS)
+        
+        report = f"{get_phrase('evening')}\n\n🌙 **ИТОГИ ДНЯ**\n"
+        report += f"📊 Сигналов найдено: {DAILY_STATS['signals_found']}\n"
+        report += f"🧠 Прогнозов: {DAILY_STATS['predictions_made']} (сбылось {DAILY_STATS['predictions_success']})\n"
+        report += f"📆 Сделок закрыто: {len(day_trades)} (✅{wins} | ❌{losses})\n"
+        report += f"💰 P&L за день: {total_pnl:+.2f}%\n"
+        if active_count > 0:
+            report += f"⏳ Висящих сделок: {active_count} (ждут тайм-аута)"
+        
         await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=report, parse_mode=ParseMode.MARKDOWN)
         DAILY_STATS.update({"signals_found":0,"predictions_made":0,"predictions_success":0})
 
@@ -701,7 +738,7 @@ async def stop_reminder(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v30.3\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}\nНавигатор: сигналы с секторами", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v31.0\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}\nБухгалтер: учёт каждой сделки", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -756,7 +793,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             recent = list(history.items())[-5:]
             msg = "🌫️ **ИСТОРИЯ (авто)**\n\n"
             for sid, s in reversed(recent):
-                emoji = "✅" if s.get('status') == 'tp' else "❌"
+                reason = s.get('reason', s.get('status', 'unknown'))
+                emoji = "✅" if reason == 'TP' else ("⏰" if reason == 'TIMEOUT' else "❌")
                 msg += f"{emoji} {s['symbol']} | {s.get('pnl', 0):+.2f}%\n"
             await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
         elif text == "⚙️ СТРОГОСТЬ":
@@ -799,7 +837,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v30.3 (Навигатор)")
+    print("🌙 TradeSight Pro WHISPER v31.0 (Бухгалтер)")
     print("="*60)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -810,15 +848,14 @@ def main():
     app.job_queue.run_repeating(full_summary_loop, interval=300, first=30)
     app.job_queue.run_repeating(auto_scan_loop, interval=300, first=60)
     app.job_queue.run_repeating(emergency_check, interval=300, first=90)
-    app.job_queue.run_repeating(check_active_trades, interval=60, first=120, name="fast_check")
-    app.job_queue.run_repeating(check_active_trades, interval=300, first=120, name="slow_check")
-    app.job_queue.run_repeating(evening_ritual, interval=60, first=150)
     app.job_queue.run_repeating(stop_reminder, interval=60, first=30)
+    app.job_queue.run_repeating(check_active_trades, interval=60, first=120)
     app.job_queue.run_repeating(check_predictions, interval=900, first=180)
+    app.job_queue.run_repeating(evening_ritual, interval=60, first=150)
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
     app.job_queue.run_repeating(weekday_heatmap, interval=3600, first=300)
-    print("🌙 Навигатор запущен. Сектора и сигналы объединены.")
+    print("🌙 Бухгалтер запущен. Каждая сделка будет учтена.")
     app.run_polling()
 
 if __name__ == "__main__":
