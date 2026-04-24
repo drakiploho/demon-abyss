@@ -5,6 +5,7 @@ TradeSight Pro v31.0 WHISPER (Бухгалтер)
 + Тайм-аут сделки (6 часов) — не даёт сделкам "виснуть"
 + Починка "Умного безубытка" — советы приходят вовремя
 + Итоги дня теперь показывают реальную картину
++ Добавлен сектор Commodities (XAUT, PAXG) для токенизированного золота
 """
 import asyncio, json, logging, os, sys, time, traceback, random, pytz, re, io
 from datetime import datetime, timedelta
@@ -116,6 +117,7 @@ LESSONS = [
     {"title": "🎯 ATR", "text": "ATR показывает волатильность.", "use": "Ставь стоп-лосс на расстоянии 1.5-2 ATR от входа."}
 ]
 
+# ⚡️ РАСШИРЕННЫЙ СЛОВАРЬ СЕКТОРОВ (С ДОБАВЛЕННЫМ COMMODITIES)
 SECTORS = {
     "Layer-1": ["BTC","ETH","SOL","ADA","AVAX","DOT","NEAR","ALGO","ATOM","FTM","INJ","ICP","APT","SUI","SEI","TIA","TON"],
     "DeFi": ["UNI","AAVE","MKR","SNX","COMP","CRV","SUSHI","LDO","GMX","HYPE","JUP","JTO","RAY","DYDX","1INCH"],
@@ -131,7 +133,8 @@ SECTORS = {
     "RWA": ["ONDO","TRU","SNX"],
     "Derivatives": ["DYDX","GMX","GNS"],
     "Launchpad": ["SUPER","SNFT","TKO"],
-    "Metaverse": ["RENDER","WEMIX","MBOX","ILV"]
+    "Metaverse": ["RENDER","WEMIX","MBOX","ILV"],
+    "Commodities": ["XAUT", "PAXG"]  # <-- ТОКЕНИЗИРОВАННОЕ ЗОЛОТО
 }
 
 def get_sector_for_symbol(symbol):
@@ -661,7 +664,6 @@ async def evening_ritual(context):
     msk = pytz.timezone('Europe/Moscow'); now = datetime.now(msk)
     if now.hour == 23 and now.minute == 0:
         update_mood("tired")
-        # Подводим итоги
         today = datetime.now().date()
         day_trades = []
         if HISTORY_FILE.exists():
