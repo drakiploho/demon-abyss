@@ -1,8 +1,9 @@
 pandas
 ta
 pybit
-python-telegram-bot[job-queue]
+python-telegram-bot
 pytz
 requests
 matplotlib
-numpy
+gspread
+oauth2client
