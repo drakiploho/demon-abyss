@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v32.7 WHISPER (Автоматон-Болтун)
-+ Исправлен контроль сделок (уведомление о касании TP)
+TradeSight Pro v32.8 WHISPER (Автоматон-Болтун)
++ Исправлен контроль сделок (уведомление о касании TP + защита от пропуска SL)
 + Анти-ложный пробой, дивергенция RSI, фильтр спреда, Order Book КИТ
 + Авто-фильтр секторов, анализ ликвидаций
 + Google Sheets авто-экспорт (новый лист «Сделки v32.7»)
@@ -768,23 +768,39 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
         
         try:
             kline = session.get_kline(category="spot", symbol=s["symbol"], interval="1", limit=2)
+            high_1m = None
+            low_1m = None
+            cur = None
+            
             if kline and kline.get("retCode") == 0:
                 candles = kline["result"]["list"]
                 if len(candles) >= 1:
                     high_1m = float(candles[0]["high"])
+                    low_1m = float(candles[0]["low"])
+                    cur = float(candles[0]["close"])
+                    
+                    # Проверка касания TP через high свечи
                     if not tp_touched and high_1m >= s["tp"]:
                         s["tp_touched"] = True
-                        cur = float(candles[0]["close"])
                         await context.bot.send_message(
                             chat_id=TELEGRAM_CHAT_ID,
                             text=f"🎯 **Цена была у цели!**\n{s['symbol']} коснулся **{s['tp']:.6f}** и отошёл.\nСейчас цена: **{cur:.6f}**\n💡 Закрывай сделку руками или держи дальше.",
                             parse_mode=ParseMode.MARKDOWN
                         )
+                    
+                    # Проверка SL через low свечи (защита от пропуска)
+                    if low_1m <= s["sl"]:
+                        reason = "SL"
+                        await close_signal(context, sid, s, cur, reason)
+                        del ACTIVE_SIGNALS[sid]
+                        continue
             
-            resp = session.get_tickers(category="spot", symbol=s["symbol"])
-            if resp.get("retCode") != 0: continue
-            cur = float(resp["result"]["list"][0]["lastPrice"])
-        except: continue
+            if cur is None:
+                resp = session.get_tickers(category="spot", symbol=s["symbol"])
+                if resp.get("retCode") != 0: continue
+                cur = float(resp["result"]["list"][0]["lastPrice"])
+        except:
+            continue
         
         is_sl = cur <= s["sl"] if s["signal"] == "BUY" else cur >= s["sl"]
         is_timeout = datetime.now() - s['time'] > timeout
@@ -1086,7 +1102,7 @@ async def idle_thoughts(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v32.7\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v32.8\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -1195,7 +1211,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v32.7 (Автоматон-Болтун)")
+    print("🌙 TradeSight Pro WHISPER v32.8 (Автоматон-Болтун)")
     print("="*60)
     if sheet is not None:
         print(f"📊 Google Sheets: лист '{GOOGLE_SHEET_NAME}' готов")
@@ -1216,7 +1232,7 @@ def main():
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
     app.job_queue.run_repeating(weekday_heatmap, interval=3600, first=300)
-    print("🌙 Автоматон-Болтун v32.7 запущен.")
+    print("🌙 Автоматон-Болтун v32.8 запущен.")
     app.run_polling()
 
 if __name__ == "__main__":
