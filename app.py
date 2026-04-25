@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 TradeSight Pro v32.8 WHISPER (Автоматон-Болтун)
-+ Исправлен контроль сделок (уведомление о касании TP + защита от пропуска SL)
++ Исправлен JobQueue
++ Защита от пропуска SL через проверку low минутной свечи
 + Анти-ложный пробой, дивергенция RSI, фильтр спреда, Order Book КИТ
 + Авто-фильтр секторов, анализ ликвидаций
 + Google Sheets авто-экспорт (новый лист «Сделки v32.7»)
@@ -23,7 +24,7 @@ try:
     import ta
     from pybit.unified_trading import HTTP
     from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-    from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+    from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, JobQueue
     from telegram.constants import ParseMode
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
@@ -779,7 +780,6 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
                     low_1m = float(candles[0]["low"])
                     cur = float(candles[0]["close"])
                     
-                    # Проверка касания TP через high свечи
                     if not tp_touched and high_1m >= s["tp"]:
                         s["tp_touched"] = True
                         await context.bot.send_message(
@@ -788,7 +788,6 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
                             parse_mode=ParseMode.MARKDOWN
                         )
                     
-                    # Проверка SL через low свечи (защита от пропуска)
                     if low_1m <= s["sl"]:
                         reason = "SL"
                         await close_signal(context, sid, s, cur, reason)
@@ -1217,7 +1216,7 @@ def main():
         print(f"📊 Google Sheets: лист '{GOOGLE_SHEET_NAME}' готов")
     else:
         print(f"📊 CSV-режим: {TRADES_CSV_FILE}")
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).concurrent_updates(True).job_queue(JobQueue()).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
