@@ -1,7 +1,7 @@
 pandas
 ta
 pybit
-python-telegram-bot
+python-telegram-bot[job-queue]
 pytz
 requests
 matplotlib
