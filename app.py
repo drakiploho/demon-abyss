@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v32.4 WHISPER (Автоматон-Болтун)
-+ Исправлена ошибка "Object of type datetime is not JSON serializable"
-+ Полная защита от повреждённого history.json при чтении и записи
+TradeSight Pro v32.7 WHISPER (Автоматон-Болтун)
++ Исправлен контроль сделок (уведомление о касании TP)
++ Анти-ложный пробой, дивергенция RSI, фильтр спреда, Order Book КИТ
++ Авто-фильтр секторов, анализ ликвидаций
++ Google Sheets авто-экспорт (новый лист «Сделки v32.7»)
++ Актуальный SL в таблице, SL (безубыток)
+- Убрана кнопка «Обучение»
 """
 import asyncio, json, logging, os, sys, time, traceback, random, pytz, re, io
 from datetime import datetime, timedelta
@@ -21,10 +25,16 @@ try:
     from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
     from telegram.constants import ParseMode
+    import gspread
+    from oauth2client.service_account import ServiceAccountCredentials
 except ImportError as e:
     print(f"❌ {e}")
-    os.system(f"{sys.executable} -m pip install pandas ta pybit python-telegram-bot pytz requests matplotlib")
+    os.system(f"{sys.executable} -m pip install pandas ta pybit python-telegram-bot pytz requests matplotlib gspread oauth2client")
     sys.exit(0)
+
+GOOGLE_CREDENTIALS_FILE = "credentials.json"
+GOOGLE_SHEET_ID = "1PKH_z-ec-23a4cHFpJp1C-3PePlmuI0Ksnu0j_A3hsU"
+GOOGLE_SHEET_NAME = "Сделки v32.7"
 
 async def notify_error(context: ContextTypes.DEFAULT_TYPE, error_msg: str):
     try:
@@ -44,6 +54,7 @@ PREDICTIONS_FILE = DATA_DIR / "predictions.json"
 STATS_PREDICT_FILE = DATA_DIR / "stats_predictions.json"
 MEMORY_FILE = DATA_DIR / "memory.json"
 HISTORY_FILE = DATA_DIR / "history.json"
+TRADES_CSV_FILE = DATA_DIR / "trades.csv"
 
 def load_memory():
     if MEMORY_FILE.exists(): return json.load(open(MEMORY_FILE, 'r'))
@@ -67,7 +78,6 @@ PHRASES = {
     "prediction_success": ["✅ Моё видение сбылось!", "🎯 В яблочко!"],
     "prediction_fail": ["❌ Видение не сбылось. Рынок хаотичен.", "🌫️ Бездна ошиблась. Прости, смертный."],
     "evening": ["🌙 День подходит к концу.", "😴 Я устал. Пора в Бездну."],
-    "lesson_intro": ["📚 Время для мудрости Бездны.", "🧠 Пока рынок спит, займёмся твоим развитием."],
     "tilt_warning": ["💀 Три удара подряд... Бездна шепчет быть осторожнее.", "😵‍💫 Стратегия хромает. Может, сменим пластинку?", "☕️ Тяжелый период. Сделай паузу, смертный."]
 }
 def get_phrase(c): return random.choice(PHRASES.get(c, ["..."]))
@@ -96,7 +106,7 @@ log_file = DATA_DIR / "bot.log"
 handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3, encoding='utf-8')
 handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logging.basicConfig(level=logging.WARNING, handlers=[handler, logging.StreamHandler()])
-for lib in ["httpx", "telegram.ext", "pybit"]: logging.getLogger(lib).setLevel(logging.WARNING)
+for lib in ["httpx", "telegram.ext", "pybit", "gspread", "oauth2client"]: logging.getLogger(lib).setLevel(logging.WARNING)
 
 session = HTTP(testnet=False)
 AUTO_SCAN = AUTO_START
@@ -108,12 +118,72 @@ DAILY_STATS = {"signals_found": 0, "predictions_made": 0, "predictions_success":
 WEEKLY_STATS = {"user_trades": 0, "user_wins": 0, "user_pnl": 0.0, "bot_predictions": 0, "bot_wins": 0}
 CONSECUTIVE_LOSSES = {"ПРОБОЙ": 0, "ОТСКОК": 0, "СКРЫТЫЙ": 0, "КИТ": 0, "КРЕСТ": 0}
 COIN_OF_DAY = {"symbol": "BTCUSDT", "reason": "Рынок ждёт новостей."}
+LIQUIDATIONS_WARNING_UNTIL = None
+TOP_SECTORS = []
 
-LESSONS = [
-    {"title": "📊 RSI", "text": "RSI от 0 до 100. Выше 70 — перекуплен. Ниже 30 — перепродан.", "use": "Покупай когда RSI между 50 и 70 при восходящем тренде."},
-    {"title": "📈 Объём", "text": "Объём подтверждает силу движения.", "use": "Входи только если объём выше среднего в 1.5+ раза."},
-    {"title": "🎯 ATR", "text": "ATR показывает волатильность.", "use": "Ставь стоп-лосс на расстоянии 1.5-2 ATR от входа."}
-]
+# ========== GOOGLE SHEETS ==========
+gc = None
+sheet = None
+try:
+    if os.path.exists(GOOGLE_CREDENTIALS_FILE):
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
+        gc = gspread.authorize(creds)
+        try:
+            sh = gc.open_by_key(GOOGLE_SHEET_ID)
+            try:
+                sheet = sh.worksheet(GOOGLE_SHEET_NAME)
+                print(f"📊 Лист '{GOOGLE_SHEET_NAME}' найден.")
+            except:
+                sheet = sh.add_worksheet(title=GOOGLE_SHEET_NAME, rows=1000, cols=13)
+                headers = ["Дата", "Время", "Монета", "Сектор", "Стратегия", "Score", "Вход", "Выход", "P&L%", "Причина", "RSI", "Объём", "Риск/Прибыль"]
+                sheet.append_row(headers)
+                print(f"📊 Создан новый лист '{GOOGLE_SHEET_NAME}' с заголовками.")
+        except Exception as e:
+            print(f"⚠️ Ошибка доступа к Google Sheets: {e}. Сделки будут сохраняться в CSV.")
+            sheet = None
+    else:
+        print("⚠️ credentials.json не найден. Сделки будут сохраняться в CSV.")
+except Exception as e:
+    print(f"⚠️ Google Sheets недоступен: {e}. Сделки будут сохраняться в CSV.")
+    sheet = None
+
+if sheet is None:
+    if not TRADES_CSV_FILE.exists():
+        with open(TRADES_CSV_FILE, 'w', encoding='utf-8') as f:
+            f.write("Дата,Время,Монета,Сектор,Стратегия,Score,Вход,Выход,P&L%,Причина,RSI,Объём,Риск/Прибыль\n")
+        print(f"📊 Создан CSV-файл: {TRADES_CSV_FILE}")
+
+def save_trade_to_sheet(trade_data):
+    row = [
+        trade_data.get("date", ""),
+        trade_data.get("time", ""),
+        trade_data.get("symbol", ""),
+        trade_data.get("sector", ""),
+        trade_data.get("strategy", ""),
+        trade_data.get("score", ""),
+        trade_data.get("entry", ""),
+        trade_data.get("exit", ""),
+        trade_data.get("pnl", ""),
+        trade_data.get("reason", ""),
+        trade_data.get("rsi", ""),
+        trade_data.get("volume", ""),
+        trade_data.get("rr", "")
+    ]
+    
+    if sheet is not None:
+        try:
+            sheet.append_row(row)
+            print(f"📊 Сделка записана в Google Sheets")
+        except Exception as e:
+            print(f"⚠️ Ошибка записи в Google Sheets: {e}")
+    
+    try:
+        with open(TRADES_CSV_FILE, 'a', encoding='utf-8') as f:
+            f.write(','.join(str(x) for x in row) + '\n')
+    except Exception as e:
+        print(f"⚠️ Ошибка записи в CSV: {e}")
+# =====================================
 
 SECTORS = {
     "Layer-1": ["BTC","ETH","SOL","ADA","AVAX","DOT","NEAR","ALGO","ATOM","FTM","INJ","ICP","APT","SUI","SEI","TIA","TON"],
@@ -137,9 +207,26 @@ SECTORS = {
 def get_sector_for_symbol(symbol):
     coin = symbol.replace("USDT", "")
     for sector, coins in SECTORS.items():
-        if coin in coins:
-            return sector
+        if coin in coins: return sector
     return "Other"
+
+def get_top_sectors() -> List[str]:
+    global TOP_SECTORS
+    try:
+        data = session.get_tickers(category="spot")
+        if data.get("retCode") != 0: return TOP_SECTORS if TOP_SECTORS else []
+        tickers = data["result"]["list"]
+        sector_perf = {}
+        for sec, coins in SECTORS.items():
+            gains = []
+            for t in tickers:
+                sym = t["symbol"].replace("USDT", "")
+                if sym in coins: gains.append(float(t.get("price24hPcnt", 0)) * 100)
+            if gains: sector_perf[sec] = sum(gains) / len(gains)
+        sorted_sectors = sorted(sector_perf.items(), key=lambda x: x[1], reverse=True)
+        TOP_SECTORS = [s[0] for s in sorted_sectors[:3]]
+        return TOP_SECTORS
+    except: return TOP_SECTORS if TOP_SECTORS else []
 
 def is_sleep_time():
     msk = pytz.timezone('Europe/Moscow'); now = datetime.now(msk)
@@ -162,19 +249,99 @@ def get_btc_correlation(symbol: str) -> float:
         return ret_btc.loc[idx].corr(ret_sym.loc[idx]) if len(idx) >= 30 else 0.0
     except: return 0.0
 
-MAIN_KEYBOARD = ReplyKeyboardMarkup([["📊 СВОДКА", "🔥 СИГНАЛЫ"], ["📚 ОБУЧЕНИЕ", "⚡ СКАЛЬП"], ["⚙️ ЕЩЁ"]], resize_keyboard=True)
+def get_spread(symbol: str) -> float:
+    try:
+        resp = session.get_tickers(category="spot", symbol=symbol)
+        if resp.get("retCode") != 0: return 0.0
+        ticker = resp["result"]["list"][0]
+        ask = float(ticker.get("askPrice", 0))
+        bid = float(ticker.get("bidPrice", 0))
+        if ask <= 0 or bid <= 0: return 0.0
+        return (ask - bid) / bid * 100
+    except: return 0.0
+
+def get_orderbook_imbalance(symbol: str) -> float:
+    try:
+        resp = session.get_orderbook(category="spot", symbol=symbol, limit=25)
+        if resp.get("retCode") != 0: return 1.0
+        bids = resp["result"].get("b", [])
+        asks = resp["result"].get("a", [])
+        if not bids or not asks: return 1.0
+        bids_sum = sum(float(b[1]) for b in bids[:10])
+        asks_sum = sum(float(a[1]) for a in asks[:10])
+        if asks_sum == 0: return 2.0
+        return bids_sum / asks_sum
+    except: return 1.0
+
+def get_liquidation_spike() -> Optional[float]:
+    global LIQUIDATIONS_WARNING_UNTIL
+    try:
+        resp = session.get_public_liq_records(category="linear", limit=100)
+        if resp.get("retCode") != 0: return None
+        records = resp["result"]["list"]
+        now = datetime.now()
+        total_liq = 0.0
+        for r in records:
+            liq_time = datetime.fromtimestamp(int(r.get("updatedTime", 0)) / 1000)
+            if (now - liq_time).seconds < 300:
+                total_liq += float(r.get("size", 0))
+        if total_liq > 10_000_000:
+            LIQUIDATIONS_WARNING_UNTIL = now + timedelta(minutes=15)
+            return total_liq
+        return None
+    except:
+        return None
+
+def is_liquidation_warning_active() -> bool:
+    if LIQUIDATIONS_WARNING_UNTIL is None: return False
+    return datetime.now() < LIQUIDATIONS_WARNING_UNTIL
+
+MAIN_KEYBOARD = ReplyKeyboardMarkup([["📊 СВОДКА", "🔥 СИГНАЛЫ"], ["⚡ СКАЛЬП", "⚙️ ЕЩЁ"]], resize_keyboard=True)
 MORE_KEYBOARD = ReplyKeyboardMarkup([["📆 ИТОГИ ДНЯ", "🌫️ ИСТОРИЯ"], ["🧠 СТАТ ПРОГНОЗОВ", "⚙️ СТРОГОСТЬ"], ["🔇 ТИХО", "🔙 НАЗАД"]], resize_keyboard=True)
 
-def load_predictions(): return json.load(open(PREDICTIONS_FILE, 'r')) if PREDICTIONS_FILE.exists() else []
-def save_predictions(p): json.dump(p, open(PREDICTIONS_FILE, 'w'), indent=2)
-def load_stats_predict(): return json.load(open(STATS_PREDICT_FILE, 'r')) if STATS_PREDICT_FILE.exists() else {"total":0,"success":0,"failed":0}
-def save_stats_predict(s): json.dump(s, open(STATS_PREDICT_FILE, 'w'), indent=2)
+def load_predictions():
+    if PREDICTIONS_FILE.exists():
+        try:
+            with open(PREDICTIONS_FILE, 'r') as f:
+                content = f.read().strip()
+                if content: return json.loads(content)
+        except: pass
+    return []
+
+def save_predictions(p):
+    try:
+        with open(PREDICTIONS_FILE, 'w') as f:
+            json.dump(p, f, indent=2, default=str)
+    except: pass
+
+def load_stats_predict():
+    if STATS_PREDICT_FILE.exists():
+        try:
+            with open(STATS_PREDICT_FILE, 'r') as f:
+                content = f.read().strip()
+                if content: return json.loads(content)
+        except: pass
+    return {"total": 0, "success": 0, "failed": 0}
+
+def save_stats_predict(s):
+    try:
+        with open(STATS_PREDICT_FILE, 'w') as f:
+            json.dump(s, f, indent=2)
+    except: pass
 
 def add_prediction(symbol: str, price: float, direction: str, confidence: float):
     preds = load_predictions()
-    preds.append({"symbol": symbol, "start_price": price, "direction": direction, "confidence": confidence, "time": datetime.now().isoformat(), "checked": False})
+    preds.append({
+        "symbol": symbol,
+        "start_price": price,
+        "direction": direction,
+        "confidence": confidence,
+        "time": datetime.now().isoformat(),
+        "checked": False
+    })
     save_predictions(preds)
-    DAILY_STATS["predictions_made"] += 1; WEEKLY_STATS["bot_predictions"] += 1
+    DAILY_STATS["predictions_made"] += 1
+    WEEKLY_STATS["bot_predictions"] += 1
 
 async def check_predictions(context: ContextTypes.DEFAULT_TYPE):
     preds = load_predictions()
@@ -205,9 +372,21 @@ async def check_predictions(context: ContextTypes.DEFAULT_TYPE):
 
 def get_stats_message():
     stats = load_stats_predict()
-    if stats["total"] == 0: return "🧠 **СТАТИСТИКА ПРОГНОЗОВ**\n\nПока нет данных."
+    if stats["total"] == 0:
+        preds = load_predictions()
+        if preds:
+            return f"🧠 **СТАТИСТИКА ПРОГНОЗОВ**\n\n📊 Прогнозов сделано: {len(preds)}\n⏳ Ожидают проверки...\n\nПрогнозы проверяются через 4 часа после создания."
+        return "🧠 **СТАТИСТИКА ПРОГНОЗОВ**\n\nПока нет данных. Прогнозы создаются автоматически при анализе рынка."
     winrate = (stats["success"] / stats["total"] * 100) if stats["total"] > 0 else 0
-    return f"🧠 **ТОЧНОСТЬ ДУХОВ**\n\n📊 За всё время: {stats['total']}\n✅ Сбылось: {stats['success']}\n❌ Не сбылось: {stats['failed']}\n🎯 Точность: **{winrate:.1f}%**"
+    return f"""🧠 **ТОЧНОСТЬ ДУХОВ**
+
+📊 **За всё время:**
+• Всего прогнозов: {stats['total']}
+• ✅ Сбылось: {stats['success']}
+• ❌ Не сбылось: {stats['failed']}
+• 🎯 Точность: **{winrate:.1f}%**
+
+💫 {'Духи мудры и точны.' if winrate >= 60 else 'Духи учатся с каждой сделкой.'}"""
 
 def get_cluster_analysis() -> str:
     try:
@@ -286,6 +465,13 @@ def calculate_indicators(df):
     return df
 
 def analyze_symbol(symbol, interval="5", fast_mode=False):
+    global TOP_SECTORS
+    
+    spread = get_spread(symbol)
+    if spread > 1.0:
+        return None
+    spread_penalty = 20 if spread > 0.5 else 0
+    
     df = get_klines(symbol, interval, 100 if fast_mode else 200)
     if df is None or len(df) < 50: return None
     df = calculate_indicators(df)
@@ -298,50 +484,95 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
     if last["volume_ratio"] < vol_thresh: return None
 
     signal_info = None
+    bonus_score = 0
+    tags = []
+
+    if not TOP_SECTORS:
+        get_top_sectors()
+    sector = get_sector_for_symbol(symbol)
+    if sector in TOP_SECTORS:
+        bonus_score += 10
+        tags.append("🔥 Фаворит сектора")
+    
+    if is_liquidation_warning_active():
+        bonus_score -= 15
+        tags.append("⚠️ Высокие ликвидации")
 
     # 1. ПРОБОЙ ТРЕНДА
     if (last["ema20"] > last["ema50"] and last["close"] > prev["high"] * 1.001 and 
         50 < last["rsi"] < (80 if fast_mode else 75) and last["macd"] > last["macd_signal"]):
         sl = price - atr * (1.0 if fast_mode else 1.5)
         tp = price + atr * (1.2 if fast_mode else 2.5)
-        signal_info = (sl, tp, 65, "🟢 ПРОБОЙ ТРЕНДА", "Рынок в движении. Цена пробила максимум.")
+        base_score = 65
+        is_green = last["close"] > last["open"]
+        vol_ok = last["volume_ratio"] > 0.8
+        if is_green and vol_ok:
+            base_score += 10
+            tags.append("✅ Пробой подтверждён")
+        elif not is_green:
+            base_score -= 20
+            tags.append("⚠️ Пробой слабый")
+        signal_info = (sl, tp, base_score, "🟢 ПРОБОЙ ТРЕНДА", "Рынок в движении. Цена пробила максимум.")
 
     # 2. ОТСКОК
     elif (last["close"] <= last["bb_lower"] and last["rsi"] < 45 and 
           last["volume_ratio"] > 1.2 and not (last["ema20"] > last["ema50"])):
         sl = price - atr * 0.8
         tp = price + atr * 1.5
-        signal_info = (sl, tp, 55, "🟡 ОТСКОК ОТ БЕЗДНЫ", "Рынок в боковике. Цена у нижней границы.")
+        base_score = 55
+        if len(df) >= 40:
+            lookback = min(20, len(df) - 2)
+            recent = df.iloc[-lookback:]
+            price_lows = recent["close"].values
+            rsi_lows = recent["rsi"].values
+            min_idx1 = price_lows.argmin()
+            min_idx2 = price_lows[:min_idx1].argmin() if min_idx1 > 0 else 0
+            if min_idx1 > 0 and min_idx2 >= 0:
+                if price_lows[min_idx1] < price_lows[min_idx2] and rsi_lows[min_idx1] > rsi_lows[min_idx2]:
+                    base_score += 15
+                    tags.append("🔄 Сила медведей иссякает")
+        signal_info = (sl, tp, base_score, "🟡 ОТСКОК ОТ БЕЗДНЫ", "Рынок в боковике. Цена у нижней границы.")
 
     # 3. СКРЫТЫЙ БЫК
     elif (last["close"] < prev["close"] and last["rsi"] > prev["rsi"] and 
           last["rsi"] < 50 and last["volume_ratio"] > 1.0):
         sl = price - atr * 1.0
         tp = price + atr * 1.8
-        signal_info = (sl, tp, 60, "🐂 СКРЫТЫЙ БЫК", "Цена падает, но сила медведей иссякает.")
+        base_score = 60
+        signal_info = (sl, tp, base_score, "🐂 СКРЫТЫЙ БЫК", "Цена падает, но сила медведей иссякает.")
 
     # 4. КИТ
     elif (last["close"] < last["open"] and last["volume_ratio"] > 2.5 and 
           last["low"] > prev["low"]):
         sl = price - atr * 0.5
         tp = price + atr * 1.5
-        signal_info = (sl, tp, 70, "🐋 КИТ НА ОХОТЕ", "Кто-то крупный вытряхнул слабые руки.")
+        base_score = 70
+        imbalance = get_orderbook_imbalance(symbol)
+        if imbalance > 1.5:
+            base_score += 15
+            tags.append("🐋 Кит подтверждён в стакане")
+        elif imbalance < 0.5:
+            return None
+        signal_info = (sl, tp, base_score, "🐋 КИТ НА ОХОТЕ", "Кто-то крупный вытряхнул слабые руки.")
 
     # 5. КРЕСТ
     elif (prev["ema20"] <= prev["ema50"] and last["ema20"] > last["ema50"] and 
           last["volume_ratio"] > 1.0):
         sl = price - atr * 1.5
         tp = price + atr * 2.0
-        signal_info = (sl, tp, 75, "✝️ ЗОЛОТОЙ КРЕСТ", "Быстрая EMA пересекла медленную вверх.")
+        base_score = 75
+        signal_info = (sl, tp, base_score, "✝️ ЗОЛОТОЙ КРЕСТ", "Быстрая EMA пересекла медленную вверх.")
 
     if not signal_info: return None
 
     sl, tp, base_score, strat_name, strat_desc = signal_info
     
-    score = base_score
+    score = base_score + bonus_score
     if last["rsi"] > 55 and "ПРОБОЙ" in strat_name: score += 10
     if last["rsi"] < 40 and "ОТСКОК" in strat_name: score += 10
     if last["volume_ratio"] > 1.8: score += 10
+    
+    score -= spread_penalty
     
     min_score = 40 if fast_mode else MIN_SCORE
     if score < min_score: return None
@@ -354,8 +585,11 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
         "score": score, "rsi": last["rsi"], "volume_ratio": last["volume_ratio"],
         "rr": rr, "time": datetime.now(), "atr": atr, "btc_corr": btc_corr,
         "strategy": strat_name, "strategy_desc": strat_desc,
-        "sector": get_sector_for_symbol(symbol),
-        "events": []
+        "sector": sector,
+        "events": [],
+        "tags": tags,
+        "original_sl": sl,
+        "breakeven_done": False
     }
 
 def format_signal(s):
@@ -377,6 +611,15 @@ def format_signal(s):
     
     sector_str = f" ({s.get('sector', 'Other')})" if s.get('sector') else ""
     
+    tags_line = ""
+    if s.get('tags'):
+        tags_line = "\n" + " | ".join(s['tags'])
+    
+    spread_warning = ""
+    spread_val = get_spread(s['symbol'])
+    if spread_val > 0.5:
+        spread_warning = f"\n⚠️ Спред: {spread_val:.1f}% — высокий"
+    
     return f"""
 {strat_emoji} [ СТРАТЕГИЯ: {s['strategy']} ] {strat_emoji}
 **Рынок:** {s['strategy_desc']}
@@ -388,7 +631,7 @@ def format_signal(s):
 🛑 СТОП: {s['sl']:.6f}
 
 📊 RSI: {s['rsi']:.1f} | Объём: x{s['volume_ratio']:.2f}
-⚖️ Риск/Прибыль: 1:{s['rr']:.2f}{corr_line}{personality}
+⚖️ Риск/Прибыль: 1:{s['rr']:.2f}{corr_line}{spread_warning}{tags_line}{personality}
 ⏰ {s['time'].strftime('%H:%M:%S')}
 """
 
@@ -440,10 +683,14 @@ def get_pending_predictions():
     return pending[:3]
 
 async def close_signal(context, sid, s, cur, reason):
-    """Закрывает сделку, записывает в историю и ОТПРАВЛЯЕТ СООБЩЕНИЕ."""
     global WEEKLY_STATS, CONSECUTIVE_LOSSES
     is_tp = reason == "TP"
     pnl = abs(cur - s["price"]) / s["price"] * 100 if is_tp else -abs(cur - s["price"]) / s["price"] * 100
+    
+    display_reason = reason
+    active_sl = s.get("sl", s.get("original_sl", 0))
+    if reason == "SL" and s.get("breakeven_done"):
+        display_reason = "SL (безубыток)"
     
     emoji = "✅" if is_tp else ("⏰" if reason == "TIMEOUT" else "❌")
     
@@ -460,29 +707,44 @@ async def close_signal(context, sid, s, cur, reason):
     else:
         for key in CONSECUTIVE_LOSSES: CONSECUTIVE_LOSSES[key] = 0
 
-    # Сохраняем в историю (с защитой от datetime)
     try:
         history = {}
         if HISTORY_FILE.exists():
             try:
                 with open(HISTORY_FILE, 'r') as f: history = json.load(f)
-            except:
-                history = {}
+            except: history = {}
         s["status"] = "tp" if is_tp else "sl"
         s["closed_time"] = datetime.now().isoformat()
         s["exit_price"] = cur
         s["pnl"] = pnl
-        s["close_reason"] = reason
+        s["close_reason"] = display_reason
+        s["active_sl"] = active_sl
         history[sid] = s
-        # Запись с преобразованием datetime в строки
         with open(HISTORY_FILE, 'w') as f:
             json.dump(history, f, indent=2, default=str)
-    except Exception as e:
+    except:
         try:
             with open(HISTORY_FILE, 'w') as f:
                 json.dump({sid: s}, f, indent=2, default=str)
-        except:
-            pass
+        except: pass
+    
+    now = datetime.now()
+    trade_data = {
+        "date": now.strftime("%d.%m.%Y"),
+        "time": now.strftime("%H:%M:%S"),
+        "symbol": s.get("symbol", ""),
+        "sector": s.get("sector", "Other"),
+        "strategy": s.get("strategy", ""),
+        "score": s.get("score", ""),
+        "entry": f"{s.get('price', 0):.6f}",
+        "exit": f"{cur:.6f}",
+        "pnl": f"{pnl:+.2f}%",
+        "reason": display_reason,
+        "rsi": f"{s.get('rsi', 0):.1f}",
+        "volume": f"x{s.get('volume_ratio', 0):.2f}",
+        "rr": f"1:{s.get('rr', 0):.2f}"
+    }
+    save_trade_to_sheet(trade_data)
     
     WEEKLY_STATS["user_trades"] += 1
     if is_tp: WEEKLY_STATS["user_wins"] += 1
@@ -490,7 +752,7 @@ async def close_signal(context, sid, s, cur, reason):
     
     event_log = f"{emoji} **СДЕЛКА ЗАКРЫТА**\n\n"
     event_log += f"🔮 {escape_markdown(s['symbol'])}\n"
-    event_log += f"📊 Причина: **{reason}**\n"
+    event_log += f"📊 Причина: **{display_reason}**\n"
     event_log += f"💵 Вход: ${s['price']:.6f}\n"
     event_log += f"💵 Выход: ${cur:.6f}\n"
     event_log += f"💰 P&L: **{pnl:+.2f}%**"
@@ -501,48 +763,67 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
     timeout = timedelta(hours=6)
     for sid, s in list(ACTIVE_SIGNALS.items()):
         if datetime.now() - s['time'] < timedelta(minutes=1): continue
+        
+        tp_touched = s.get("tp_touched", False)
+        
         try:
+            kline = session.get_kline(category="spot", symbol=s["symbol"], interval="1", limit=2)
+            if kline and kline.get("retCode") == 0:
+                candles = kline["result"]["list"]
+                if len(candles) >= 1:
+                    high_1m = float(candles[0]["high"])
+                    if not tp_touched and high_1m >= s["tp"]:
+                        s["tp_touched"] = True
+                        cur = float(candles[0]["close"])
+                        await context.bot.send_message(
+                            chat_id=TELEGRAM_CHAT_ID,
+                            text=f"🎯 **Цена была у цели!**\n{s['symbol']} коснулся **{s['tp']:.6f}** и отошёл.\nСейчас цена: **{cur:.6f}**\n💡 Закрывай сделку руками или держи дальше.",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+            
             resp = session.get_tickers(category="spot", symbol=s["symbol"])
             if resp.get("retCode") != 0: continue
             cur = float(resp["result"]["list"][0]["lastPrice"])
         except: continue
         
-        is_tp = cur >= s["tp"] if s["signal"] == "BUY" else cur <= s["tp"]
         is_sl = cur <= s["sl"] if s["signal"] == "BUY" else cur >= s["sl"]
         is_timeout = datetime.now() - s['time'] > timeout
 
-        if is_tp or is_sl or is_timeout:
-            reason = "TP" if is_tp else ("SL" if is_sl else "TIMEOUT")
+        if is_sl or is_timeout:
+            reason = "SL" if is_sl else "TIMEOUT"
             await close_signal(context, sid, s, cur, reason)
             del ACTIVE_SIGNALS[sid]
-        else:
+        elif not tp_touched:
             progress = (cur - s["price"]) / (s["tp"] - s["price"]) if s["tp"] != s["price"] else 0
             
             if progress >= 0.15 and not s.get("breakeven_done"):
                 s["breakeven_done"] = True
                 safe_sl = s['price'] - (s.get('atr', 0) * 0.2)
                 safe_sl = max(safe_sl, s['sl'])
-                event = {
+                s["sl"] = safe_sl
+                s.setdefault("events", []).append({
                     "time": datetime.now().isoformat(),
                     "type": "breakeven",
-                    "message": f"Умный безубыток. Подтяни стоп до ${safe_sl:.4f}",
+                    "message": f"Стоп передвинут на {safe_sl:.4f}",
                     "price": safe_sl
-                }
-                s.setdefault("events", []).append(event)
-                msg = f"📈 **УМНЫЙ БЕЗУБЫТОК**\n{s['symbol']} в плюсе.\n💡 Подтяни стоп до **{safe_sl:.4f}** (зазор от входа {s['price'] - safe_sl:.4f})"
-                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
+                })
+                await context.bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=f"🛑 **Передвинь стоп-лосс на {safe_sl:.4f}**\n{s['symbol']} — теперь сделка без убытка."
+                )
             
             if progress >= 0.5 and not s.get("partial_done"):
                 s["partial_done"] = True
-                event = {
+                s.setdefault("events", []).append({
                     "time": datetime.now().isoformat(),
                     "type": "partial",
-                    "message": "Частичная фиксация. Закрой 30-50% позиции, остальное переведи в безубыток",
+                    "message": "Закрой половину, остаток держи",
                     "price": cur
-                }
-                s.setdefault("events", []).append(event)
-                msg = f"✂️ **ЧАСТИЧНАЯ ФИКСАЦИЯ**\n{s['symbol']} прошёл 50% до цели.\n💡 Закрой 30-50% позиции, остальное переведи в безубыток."
-                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
+                })
+                await context.bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=f"✂️ **Закрой половину позиции**\n{s['symbol']} — остаток держи. Стоп уже в безубытке."
+                )
 
 async def daily_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().date()
@@ -552,14 +833,11 @@ async def daily_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if HISTORY_FILE.exists():
             with open(HISTORY_FILE, 'r') as f:
                 content = f.read().strip()
-                if content:
-                    history = json.loads(content)
-    except Exception:
+                if content: history = json.loads(content)
+    except:
         try:
-            with open(HISTORY_FILE, 'w') as f:
-                json.dump({}, f)
-        except:
-            pass
+            with open(HISTORY_FILE, 'w') as f: json.dump({}, f)
+        except: pass
         await update.message.reply_text("📆 История сделок пуста. (Старый файл был повреждён и заменён).")
         return
 
@@ -573,8 +851,7 @@ async def daily_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             ct = datetime.fromisoformat(s['closed_time']).date()
             if ct == today: day_trades.append(s)
-        except:
-            continue
+        except: continue
 
     if not day_trades:
         active_count = len(ACTIVE_SIGNALS)
@@ -671,12 +948,18 @@ async def auto_scan_loop(context):
                 if len(signals) >= 3: break
         if signals:
             LAST_SIGNAL_TIME = datetime.now()
+            DAILY_STATS["signals_found"] += len(signals)
             for s in signals:
-                try: await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=format_signal(s), parse_mode=ParseMode.MARKDOWN)
-                except Exception as e: await notify_error(context, f"Ошибка отправки сигнала: {e}")
+                sid = f"{s['symbol']}_{s['time'].strftime('%H%M%S')}"
+                ACTIVE_SIGNALS[sid] = s
+                try:
+                    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=format_signal(s), parse_mode=ParseMode.MARKDOWN)
+                    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="⏳ Сделка взята на авто-сопровождение. Я буду держать тебя в курсе каждого важного шага.")
+                except Exception as e:
+                    await notify_error(context, f"Ошибка отправки сигнала: {e}")
 
 async def emergency_check(context):
-    global MARKET_CRASH_NOTIFIED, MARKET_PUMP_NOTIFIED
+    global MARKET_CRASH_NOTIFIED, MARKET_PUMP_NOTIFIED, LIQUIDATIONS_WARNING_UNTIL
     await asyncio.sleep(60)
     while True:
         await asyncio.sleep(300)
@@ -693,6 +976,13 @@ async def emergency_check(context):
                     update_mood("excited")
                     await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚨 **ПАМП!** BTC +{ch:.1f}% за 15 мин.\n{get_phrase('market_up')}")
                     MARKET_PUMP_NOTIFIED, MARKET_CRASH_NOTIFIED = True, False
+            
+            liq_amount = get_liquidation_spike()
+            if liq_amount:
+                await context.bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=f"💀 **Рынок трясёт!**\nЛиквидаций на ${liq_amount/1_000_000:.0f}M за 5 минут.\nВсе сигналы с пометкой ⚠️ ближайшие 15 минут."
+                )
         except: pass
 
 async def full_summary_loop(context):
@@ -705,6 +995,7 @@ async def full_summary_loop(context):
             market = get_market_summary()
             clusters = get_cluster_analysis()
             pending = get_pending_predictions()
+            top_sec = get_top_sectors()
             signals = []
             for sym in get_top_symbols(15):
                 s = analyze_symbol(sym)
@@ -712,6 +1003,10 @@ async def full_summary_loop(context):
                     signals.append(s)
                     if len(signals) >= 3: break
             report = f"📊 **АВТО-СВОДКА** ({now.strftime('%H:%M')})\n\n{market}\n\n{clusters if clusters else ''}"
+            if top_sec:
+                report += f"\n🔥 **Фавориты:** {', '.join(top_sec)}\n"
+            if is_liquidation_warning_active():
+                report += "\n⚠️ **Рынок трясёт — осторожно!**\n"
             if pending:
                 report += "\n🧠 **ПРОГНОЗЫ НА ПРОВЕРКЕ:**\n"
                 for p in pending: report += f"• {p['symbol']}: жду {p['direction']} до ${p['target']:.4f} (осталось {p['time_left']})\n"
@@ -791,7 +1086,7 @@ async def idle_thoughts(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v32.4\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}\nАвтоматон-Болтун: полный контроль", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v32.7\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -806,6 +1101,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             market = get_market_summary()
             clusters = get_cluster_analysis()
             pending = get_pending_predictions()
+            top_sec = get_top_sectors()
             signals = []
             for sym in get_top_symbols(15):
                 s = analyze_symbol(sym)
@@ -813,6 +1109,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     signals.append(s)
                     if len(signals) >= 3: break
             report = f"📊 **СВОДКА**\n\n{market}\n\n{clusters if clusters else ''}"
+            if top_sec:
+                report += f"\n🔥 **Фавориты:** {', '.join(top_sec)}\n"
+            if is_liquidation_warning_active():
+                report += "\n⚠️ **Рынок трясёт — осторожно!**\n"
             if pending:
                 report += "\n🧠 **ПРОГНОЗЫ НА ПРОВЕРКЕ:**\n"
                 for p in pending: report += f"• {p['symbol']}: жду {p['direction']} до ${p['target']:.4f} (осталось {p['time_left']})\n"
@@ -823,9 +1123,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
         elif text == "🔥 СИГНАЛЫ": await signal_search(update, context, fast=False)
         elif text == "⚡ СКАЛЬП": await signal_search(update, context, fast=True)
-        elif text == "📚 ОБУЧЕНИЕ":
-            l = random.choice(LESSONS)
-            await update.message.reply_text(f"{get_phrase('lesson_intro')}\n\n📚 **{l['title']}**\n\n{l['text']}\n\n💡 **Как применять:** {l['use']}", parse_mode=ParseMode.MARKDOWN)
         elif text == "⚙️ ЕЩЁ": await update.message.reply_text("Выбери:", reply_markup=MORE_KEYBOARD)
         elif text == "📆 ИТОГИ ДНЯ": await daily_summary(update, context)
         elif text == "📰 НОВОСТИ":
@@ -839,19 +1136,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if HISTORY_FILE.exists():
                     with open(HISTORY_FILE, 'r') as f:
                         content = f.read().strip()
-                        if content:
-                            history = json.loads(content)
+                        if content: history = json.loads(content)
             except:
                 await update.message.reply_text("🌫️ Файл истории повреждён. Он будет пересоздан.")
                 try:
                     with open(HISTORY_FILE, 'w') as f: json.dump({}, f)
                 except: pass
                 return
-            
             if not history:
                 await update.message.reply_text("🌫️ История пуста.")
                 return
-                
             recent = list(history.items())[-5:]
             msg = "🌫️ **ИСТОРИЯ (авто)**\n\n"
             for sid, s in reversed(recent):
@@ -901,8 +1195,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v32.4 (Автоматон-Болтун)")
+    print("🌙 TradeSight Pro WHISPER v32.7 (Автоматон-Болтун)")
     print("="*60)
+    if sheet is not None:
+        print(f"📊 Google Sheets: лист '{GOOGLE_SHEET_NAME}' готов")
+    else:
+        print(f"📊 CSV-режим: {TRADES_CSV_FILE}")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -918,7 +1216,7 @@ def main():
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
     app.job_queue.run_repeating(weekday_heatmap, interval=3600, first=300)
-    print("🌙 Автоматон-Болтун запущен. Все ошибки JSON исправлены.")
+    print("🌙 Автоматон-Болтун v32.7 запущен.")
     app.run_polling()
 
 if __name__ == "__main__":
