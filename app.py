@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v32.10 WHISPER (Автоматон-Болтун)
-+ Кнопки «АКТИВНЫЕ», «СТРАТЕГИИ», «ДЕТАЛИ»
-+ Предупреждение о близком SL, фильтр времени свечи
-+ Эмодзи монет и секторов, размер позиции
-+ Утренний разбор рынка, история с аналитикой
+TradeSight Pro v32.11 WHISPER (Автоматон-Болтун)
++ Сохранение активных сделок при перезапуске
++ Восстановление сопровождения после обновления
++ Все функции v32.10 сохранены
 """
 import asyncio, json, logging, os, sys, time, traceback, random, pytz, re, io
 from datetime import datetime, timedelta
@@ -32,7 +31,7 @@ except ImportError as e:
 
 GOOGLE_CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_ID = "1PKH_z-ec-23a4cHFpJp1C-3PePlmuI0Ksnu0j_A3hsU"
-GOOGLE_SHEET_NAME = "Сделки v32.10"
+GOOGLE_SHEET_NAME = "Сделки v32.11"
 
 # Эмодзи для монет
 COIN_EMOJIS = {
@@ -49,7 +48,6 @@ COIN_EMOJIS = {
     "TIA": "✨", "SEI": "🌊", "STRK": "⚡", "ZKS": "🔐", "METIS": "🏛️",
 }
 
-# Эмодзи для секторов
 SECTOR_EMOJIS = {
     "Layer-1": "🔥", "DeFi": "💧", "AI": "🤖", "Meme": "🐶", "Gaming": "🎮",
     "L2": "⚡", "Infrastructure": "🔗", "Payments": "💳", "Exchange": "🏦",
@@ -76,6 +74,7 @@ STATS_PREDICT_FILE = DATA_DIR / "stats_predictions.json"
 MEMORY_FILE = DATA_DIR / "memory.json"
 HISTORY_FILE = DATA_DIR / "history.json"
 TRADES_CSV_FILE = DATA_DIR / "trades.csv"
+ACTIVE_SIGNALS_FILE = DATA_DIR / "active_signals.json"
 
 def load_memory():
     if MEMORY_FILE.exists(): return json.load(open(MEMORY_FILE, 'r'))
@@ -197,7 +196,35 @@ def save_trade_to_sheet(trade_data):
             f.write(','.join(str(x) for x in row) + '\n')
     except Exception as e:
         print(f"⚠️ Ошибка записи в CSV: {e}")
-# =====================================
+
+# ========== СОХРАНЕНИЕ АКТИВНЫХ СДЕЛОК ==========
+def save_active_signals():
+    """Сохраняет активные сделки в JSON для восстановления после перезапуска"""
+    try:
+        serializable = {}
+        for sid, s in ACTIVE_SIGNALS.items():
+            s_copy = dict(s)
+            s_copy["time"] = s["time"].isoformat()
+            serializable[sid] = s_copy
+        with open(ACTIVE_SIGNALS_FILE, 'w') as f:
+            json.dump(serializable, f, indent=2, default=str)
+    except Exception as e:
+        print(f"⚠️ Ошибка сохранения активных сделок: {e}")
+
+def load_active_signals():
+    """Восстанавливает активные сделки из JSON после перезапуска"""
+    if not ACTIVE_SIGNALS_FILE.exists():
+        return
+    try:
+        with open(ACTIVE_SIGNALS_FILE, 'r') as f:
+            data = json.load(f)
+        for sid, s in data.items():
+            s["time"] = datetime.fromisoformat(s["time"])
+            ACTIVE_SIGNALS[sid] = s
+        print(f"📊 Восстановлено {len(ACTIVE_SIGNALS)} активных сделок")
+    except Exception as e:
+        print(f"⚠️ Ошибка загрузки активных сделок: {e}")
+# ===============================================
 
 SECTORS = {
     "Layer-1": ["BTC","ETH","SOL","ADA","AVAX","DOT","NEAR","ALGO","ATOM","FTM","INJ","ICP","APT","SUI","SEI","TIA","TON"],
@@ -254,7 +281,6 @@ def is_sleep_time():
     return 1 <= now.hour < 6 or (now.hour == 6 and now.minute < 50)
 
 def is_candle_edge_time(interval_minutes=5):
-    """Проверяет, не находимся ли мы в первой или последней минуте свечи"""
     now = datetime.now()
     minute = now.minute
     second = now.second
@@ -521,7 +547,6 @@ def calculate_indicators(df):
 def analyze_symbol(symbol, interval="5", fast_mode=False):
     global TOP_SECTORS
     
-    # Фильтр времени свечи
     if is_candle_edge_time(int(interval)):
         return None
     
@@ -828,6 +853,9 @@ async def close_signal(context, sid, s, cur, reason):
     if is_tp: WEEKLY_STATS["user_wins"] += 1
     WEEKLY_STATS["user_pnl"] += pnl
     
+    # Сохраняем активные сделки после закрытия
+    save_active_signals()
+    
     coin_emoji = get_coin_emoji(s['symbol'])
     event_log = f"{emoji} **СДЕЛКА ЗАКРЫТА**\n\n"
     event_log += f"🔮 {coin_emoji} {escape_markdown(s['symbol'])}\n"
@@ -869,7 +897,6 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
         is_sl = cur <= s["sl"] if s["signal"] == "BUY" else cur >= s["sl"]
         is_timeout = datetime.now() - s['time'] > timeout
         
-        # Проверка близости к SL
         if not is_sl and not is_timeout and not tp_touched:
             distance_to_sl = abs(cur - s["sl"]) / s["sl"] * 100
             if distance_to_sl < 2.0 and not s.get("sl_warning_sent"):
@@ -885,6 +912,7 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
             reason = "SL" if is_sl else "TIMEOUT"
             await close_signal(context, sid, s, cur, reason)
             del ACTIVE_SIGNALS[sid]
+            save_active_signals()
         elif not tp_touched:
             progress = (cur - s["price"]) / (s["tp"] - s["price"]) if s["tp"] != s["price"] else 0
             
@@ -899,6 +927,7 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
                     "message": f"Стоп передвинут на {safe_sl:.4f}",
                     "price": safe_sl
                 })
+                save_active_signals()
                 coin_emoji = get_coin_emoji(s['symbol'])
                 await context.bot.send_message(
                     chat_id=TELEGRAM_CHAT_ID,
@@ -913,6 +942,7 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
                     "message": "Закрой половину, остаток держи",
                     "price": cur
                 })
+                save_active_signals()
                 coin_emoji = get_coin_emoji(s['symbol'])
                 await context.bot.send_message(
                     chat_id=TELEGRAM_CHAT_ID,
@@ -939,7 +969,6 @@ async def get_active_signals_message():
         else:
             msg += f"{coin_emoji} **{s['symbol']}** | {s['strategy']}\n💵 Вход: {s['price']:.6f}\n🛑 Стоп: {s['sl']:.6f} | 🎯 Цель: {s['tp']:.6f}\n\n"
     
-    # Любимые и нелюбимые
     if FAVORITE_COINS:
         msg += f"💚 **Любимчики:** {', '.join(FAVORITE_COINS[:3])}\n"
     if HATED_COINS:
@@ -1027,7 +1056,6 @@ async def daily_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     best = max(day_trades, key=lambda x: x.get('pnl', -999))
     worst = min(day_trades, key=lambda x: x.get('pnl', 999))
     
-    # Мини-аналитика
     streak = 0
     last_status = None
     for t in reversed(day_trades):
@@ -1042,7 +1070,6 @@ async def daily_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     streak_text = f"{'✅' if last_status == 'win' else '❌'} {streak} подряд"
     
-    # Тренд за неделю
     weekly_trades = []
     week_ago = today - timedelta(days=7)
     for sid, s in history.items():
@@ -1121,7 +1148,6 @@ async def coin_of_day(context: ContextTypes.DEFAULT_TYPE):
     except: pass
 
 async def morning_brief(context: ContextTypes.DEFAULT_TYPE):
-    """Утренний разбор рынка в 7:50 МСК"""
     if SILENT_MODE: return
     msk = pytz.timezone('Europe/Moscow'); now = datetime.now(msk)
     if now.hour != 7 or now.minute != 50: return
@@ -1131,7 +1157,6 @@ async def morning_brief(context: ContextTypes.DEFAULT_TYPE):
         top_sec = get_top_sectors()
         btc_price = get_current_price("BTCUSDT")
         
-        # Топ-5 движений за ночь
         data = session.get_tickers(category="spot")
         if data.get("retCode") == 0:
             tickers = [(t["symbol"], float(t.get("price24hPcnt", 0)) * 100) for t in data["result"]["list"] if t["symbol"].endswith("USDT")]
@@ -1181,8 +1206,8 @@ async def auto_scan_loop(context):
             for s in signals:
                 sid = f"{s['symbol']}_{s['time'].strftime('%H%M%S')}"
                 ACTIVE_SIGNALS[sid] = s
+                save_active_signals()
                 try:
-                    # Кнопка ДЕТАЛИ
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🪙 ДЕТАЛИ", callback_data=f"details_{s['symbol']}")]])
                     await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=format_signal(s, s.get('price_ok', True), s.get('deviation', 0)), parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
                     await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="⏳ Сделка взята на авто-сопровождение. Я буду держать тебя в курсе каждого важного шага.")
@@ -1321,7 +1346,7 @@ async def idle_thoughts(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v32.10\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v32.11\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}\n📁 Сделки не теряются при обновлении", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
@@ -1395,7 +1420,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             recent = list(history.items())[-10:]
             msg = "🌫️ **ИСТОРИЯ (последние 10)**\n\n"
-            # Считаем серию
             wins_count = sum(1 for _, s in recent if s.get('status') == 'tp')
             losses_count = len(recent) - wins_count
             msg += f"📊 Из 10: ✅{wins_count} | ❌{losses_count}\n\n"
@@ -1407,7 +1431,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 coin_emoji = get_coin_emoji(s.get('symbol', ''))
                 msg += f"{emoji} {coin_emoji} {s['symbol']} | {pnl_str}{events_str}\n"
             
-            # Тренд
             if wins_count > losses_count:
                 msg += f"\n📈 **Тренд: положительный** (+{wins_count - losses_count})"
             elif losses_count > wins_count:
@@ -1449,6 +1472,7 @@ async def signal_search(update: Update, context: ContextTypes.DEFAULT_TYPE, fast
     DAILY_STATS["signals_found"] += len(signals)
     for s in signals:
         sid = f"{s['symbol']}_{s['time'].strftime('%H%M%S')}"; ACTIVE_SIGNALS[sid] = s
+        save_active_signals()
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🪙 ДЕТАЛИ", callback_data=f"details_{s['symbol']}")]])
         await update.message.reply_text(format_signal(s, s.get('price_ok', True), s.get('deviation', 0)), parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
         await update.message.reply_text("⏳ Сделка взята на авто-сопровождение. Я буду держать тебя в курсе каждого важного шага.")
@@ -1496,8 +1520,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v32.10")
+    print("🌙 TradeSight Pro WHISPER v32.11")
     print("="*60)
+    
+    # Восстанавливаем активные сделки
+    load_active_signals()
+    
     if sheet is not None:
         print(f"📊 Google Sheets: лист '{GOOGLE_SHEET_NAME}' готов")
     else:
@@ -1518,7 +1546,7 @@ def main():
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
     app.job_queue.run_repeating(weekday_heatmap, interval=3600, first=300)
-    print("🌙 Автоматон-Болтун v32.10 запущен. Спасибо, братанчик!")
+    print("🌙 Автоматон-Болтун v32.11 запущен. Сделки сохраняются!")
     app.run_polling()
 
 if __name__ == "__main__":
