@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TradeSight Pro v32.8 WHISPER (Автоматон-Болтун)
-+ Исправлен JobQueue
-+ Защита от пропуска SL через проверку low минутной свечи
-+ Анти-ложный пробой, дивергенция RSI, фильтр спреда, Order Book КИТ
-+ Авто-фильтр секторов, анализ ликвидаций
-+ Google Sheets авто-экспорт (новый лист «Сделки v32.7»)
-+ Актуальный SL в таблице, SL (безубыток)
-- Убрана кнопка «Обучение»
+TradeSight Pro v32.10 WHISPER (Автоматон-Болтун)
++ Кнопки «АКТИВНЫЕ», «СТРАТЕГИИ», «ДЕТАЛИ»
++ Предупреждение о близком SL, фильтр времени свечи
++ Эмодзи монет и секторов, размер позиции
++ Утренний разбор рынка, история с аналитикой
 """
 import asyncio, json, logging, os, sys, time, traceback, random, pytz, re, io
 from datetime import datetime, timedelta
@@ -24,7 +21,7 @@ try:
     import ta
     from pybit.unified_trading import HTTP
     from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-    from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, JobQueue
+    from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
     from telegram.constants import ParseMode
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
@@ -35,7 +32,30 @@ except ImportError as e:
 
 GOOGLE_CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_ID = "1PKH_z-ec-23a4cHFpJp1C-3PePlmuI0Ksnu0j_A3hsU"
-GOOGLE_SHEET_NAME = "Сделки v32.7"
+GOOGLE_SHEET_NAME = "Сделки v32.10"
+
+# Эмодзи для монет
+COIN_EMOJIS = {
+    "BTC": "₿", "ETH": "Ξ", "SOL": "◎", "BNB": "🟡", "XRP": "💧", "ADA": "🔵",
+    "DOGE": "🐶", "SHIB": "🐕", "PEPE": "🐸", "WIF": "🧢", "BONK": "💥",
+    "AVAX": "🔺", "DOT": "⭕", "LINK": "🔗", "MATIC": "🟣", "ARB": "🔷",
+    "OP": "🔴", "SUI": "🌊", "APT": "🦀", "NEAR": "🌈", "INJ": "💉",
+    "FET": "🤖", "AGIX": "🧠", "RNDR": "🎨", "TAO": "🧘", "WLD": "🌍",
+    "HYPE": "⚡", "JUP": "🪐", "JTO": "🌿", "RAY": "☀️", "DYDX": "📊",
+    "GMX": "🛡️", "GNS": "💪", "LDO": "🧪", "AAVE": "👻", "MKR": "🏦",
+    "UNI": "🦄", "SNX": "🔄", "COMP": "💸", "CRV": "📉", "SUSHI": "🍣",
+    "IMX": "🎮", "GALA": "🎲", "SAND": "🏖️", "MANA": "🌐", "AXS": "⚔️",
+    "ATOM": "⚛️", "FTM": "👻", "ALGO": "🔺", "ICP": "☁️", "FIL": "📁",
+    "TIA": "✨", "SEI": "🌊", "STRK": "⚡", "ZKS": "🔐", "METIS": "🏛️",
+}
+
+# Эмодзи для секторов
+SECTOR_EMOJIS = {
+    "Layer-1": "🔥", "DeFi": "💧", "AI": "🤖", "Meme": "🐶", "Gaming": "🎮",
+    "L2": "⚡", "Infrastructure": "🔗", "Payments": "💳", "Exchange": "🏦",
+    "Storage": "📁", "GambleFi": "🎰", "RWA": "🏠", "Derivatives": "📊",
+    "Launchpad": "🚀", "Metaverse": "🌐", "Commodities": "🥇", "Other": "👽"
+}
 
 async def notify_error(context: ContextTypes.DEFAULT_TYPE, error_msg: str):
     try:
@@ -157,19 +177,12 @@ if sheet is None:
 
 def save_trade_to_sheet(trade_data):
     row = [
-        trade_data.get("date", ""),
-        trade_data.get("time", ""),
-        trade_data.get("symbol", ""),
-        trade_data.get("sector", ""),
-        trade_data.get("strategy", ""),
-        trade_data.get("score", ""),
-        trade_data.get("entry", ""),
-        trade_data.get("exit", ""),
-        trade_data.get("pnl", ""),
-        trade_data.get("reason", ""),
-        trade_data.get("rsi", ""),
-        trade_data.get("volume", ""),
-        trade_data.get("rr", "")
+        trade_data.get("date", ""), trade_data.get("time", ""),
+        trade_data.get("symbol", ""), trade_data.get("sector", ""),
+        trade_data.get("strategy", ""), trade_data.get("score", ""),
+        trade_data.get("entry", ""), trade_data.get("exit", ""),
+        trade_data.get("pnl", ""), trade_data.get("reason", ""),
+        trade_data.get("rsi", ""), trade_data.get("volume", ""), trade_data.get("rr", "")
     ]
     
     if sheet is not None:
@@ -211,6 +224,13 @@ def get_sector_for_symbol(symbol):
         if coin in coins: return sector
     return "Other"
 
+def get_coin_emoji(symbol: str) -> str:
+    coin = symbol.replace("USDT", "")
+    return COIN_EMOJIS.get(coin, "💎")
+
+def get_sector_emoji(sector: str) -> str:
+    return SECTOR_EMOJIS.get(sector, "👽")
+
 def get_top_sectors() -> List[str]:
     global TOP_SECTORS
     try:
@@ -233,12 +253,41 @@ def is_sleep_time():
     msk = pytz.timezone('Europe/Moscow'); now = datetime.now(msk)
     return 1 <= now.hour < 6 or (now.hour == 6 and now.minute < 50)
 
+def is_candle_edge_time(interval_minutes=5):
+    """Проверяет, не находимся ли мы в первой или последней минуте свечи"""
+    now = datetime.now()
+    minute = now.minute
+    second = now.second
+    if interval_minutes == 1:
+        return second < 10 or second > 50
+    remaining = minute % interval_minutes
+    if remaining == 0 and second < 30:
+        return True
+    if remaining == interval_minutes - 1 and second > 30:
+        return True
+    if interval_minutes == 5 and remaining == 0:
+        return second < 20
+    return False
+
 def safe_api_call(func, *args, **kwargs):
     for attempt in range(3):
         try: return func(*args, **kwargs)
         except Exception:
             if attempt == 2: return None
             time.sleep(2)
+
+def get_current_price(symbol: str) -> Optional[float]:
+    try:
+        resp = session.get_tickers(category="spot", symbol=symbol)
+        if resp.get("retCode") != 0: return None
+        return float(resp["result"]["list"][0]["lastPrice"])
+    except: return None
+
+def check_price_ok(symbol: str, signal_price: float) -> tuple:
+    current = get_current_price(symbol)
+    if current is None: return False, 0
+    deviation = abs(current - signal_price) / signal_price * 100
+    return deviation <= 0.3, deviation
 
 def get_btc_correlation(symbol: str) -> float:
     if symbol == "BTCUSDT": return 1.0
@@ -297,8 +346,16 @@ def is_liquidation_warning_active() -> bool:
     if LIQUIDATIONS_WARNING_UNTIL is None: return False
     return datetime.now() < LIQUIDATIONS_WARNING_UNTIL
 
-MAIN_KEYBOARD = ReplyKeyboardMarkup([["📊 СВОДКА", "🔥 СИГНАЛЫ"], ["⚡ СКАЛЬП", "⚙️ ЕЩЁ"]], resize_keyboard=True)
-MORE_KEYBOARD = ReplyKeyboardMarkup([["📆 ИТОГИ ДНЯ", "🌫️ ИСТОРИЯ"], ["🧠 СТАТ ПРОГНОЗОВ", "⚙️ СТРОГОСТЬ"], ["🔇 ТИХО", "🔙 НАЗАД"]], resize_keyboard=True)
+MAIN_KEYBOARD = ReplyKeyboardMarkup([
+    ["📊 СВОДКА", "🔥 СИГНАЛЫ"],
+    ["⚡ СКАЛЬП", "🔄 АКТИВНЫЕ"],
+    ["📊 СТРАТЕГИИ", "⚙️ ЕЩЁ"]
+], resize_keyboard=True)
+MORE_KEYBOARD = ReplyKeyboardMarkup([
+    ["📆 ИТОГИ ДНЯ", "🌫️ ИСТОРИЯ"],
+    ["🧠 СТАТ ПРОГНОЗОВ", "⚙️ СТРОГОСТЬ"],
+    ["🔇 ТИХО", "🔙 НАЗАД"]
+], resize_keyboard=True)
 
 def load_predictions():
     if PREDICTIONS_FILE.exists():
@@ -333,12 +390,8 @@ def save_stats_predict(s):
 def add_prediction(symbol: str, price: float, direction: str, confidence: float):
     preds = load_predictions()
     preds.append({
-        "symbol": symbol,
-        "start_price": price,
-        "direction": direction,
-        "confidence": confidence,
-        "time": datetime.now().isoformat(),
-        "checked": False
+        "symbol": symbol, "start_price": price, "direction": direction,
+        "confidence": confidence, "time": datetime.now().isoformat(), "checked": False
     })
     save_predictions(preds)
     DAILY_STATS["predictions_made"] += 1
@@ -403,7 +456,7 @@ def get_cluster_analysis() -> str:
         if not sector_perf: return ""
         msg = "📈 **СЕКТОРА И КОНКРЕТНЫЕ МОНЕТЫ:**\n"
         for sec, avg in sorted(sector_perf.items(), key=lambda x: x[1], reverse=True):
-            em = "🟢" if avg > 0 else "🔴"
+            em = get_sector_emoji(sec)
             msg += f"{em} **{sec}:** {avg:+.1f}% — "
             top_coins = get_top_in_sector(sec, 3)
             if top_coins: msg += ", ".join([f"{c[0]} ({c[1]:+.1f}%)" for c in top_coins]) + "\n"
@@ -468,6 +521,10 @@ def calculate_indicators(df):
 def analyze_symbol(symbol, interval="5", fast_mode=False):
     global TOP_SECTORS
     
+    # Фильтр времени свечи
+    if is_candle_edge_time(int(interval)):
+        return None
+    
     spread = get_spread(symbol)
     if spread > 1.0:
         return None
@@ -493,7 +550,7 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
     sector = get_sector_for_symbol(symbol)
     if sector in TOP_SECTORS:
         bonus_score += 10
-        tags.append("🔥 Фаворит сектора")
+        tags.append(f"🔥 Фаворит сектора")
     
     if is_liquidation_warning_active():
         bonus_score -= 15
@@ -502,8 +559,8 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
     # 1. ПРОБОЙ ТРЕНДА
     if (last["ema20"] > last["ema50"] and last["close"] > prev["high"] * 1.001 and 
         50 < last["rsi"] < (80 if fast_mode else 75) and last["macd"] > last["macd_signal"]):
-        sl = price - atr * (1.0 if fast_mode else 1.5)
-        tp = price + atr * (1.2 if fast_mode else 2.5)
+        sl = price - atr * (0.6 if fast_mode else 0.8)
+        tp = price + atr * (1.5 if fast_mode else 3.0)
         base_score = 65
         is_green = last["close"] > last["open"]
         vol_ok = last["volume_ratio"] > 0.8
@@ -518,8 +575,8 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
     # 2. ОТСКОК
     elif (last["close"] <= last["bb_lower"] and last["rsi"] < 45 and 
           last["volume_ratio"] > 1.2 and not (last["ema20"] > last["ema50"])):
-        sl = price - atr * 0.8
-        tp = price + atr * 1.5
+        sl = price - atr * 0.5
+        tp = price + atr * 2.0
         base_score = 55
         if len(df) >= 40:
             lookback = min(20, len(df) - 2)
@@ -537,16 +594,16 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
     # 3. СКРЫТЫЙ БЫК
     elif (last["close"] < prev["close"] and last["rsi"] > prev["rsi"] and 
           last["rsi"] < 50 and last["volume_ratio"] > 1.0):
-        sl = price - atr * 1.0
-        tp = price + atr * 1.8
+        sl = price - atr * 0.6
+        tp = price + atr * 2.5
         base_score = 60
         signal_info = (sl, tp, base_score, "🐂 СКРЫТЫЙ БЫК", "Цена падает, но сила медведей иссякает.")
 
     # 4. КИТ
     elif (last["close"] < last["open"] and last["volume_ratio"] > 2.5 and 
           last["low"] > prev["low"]):
-        sl = price - atr * 0.5
-        tp = price + atr * 1.5
+        sl = price - atr * 0.3
+        tp = price + atr * 2.0
         base_score = 70
         imbalance = get_orderbook_imbalance(symbol)
         if imbalance > 1.5:
@@ -559,8 +616,8 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
     # 5. КРЕСТ
     elif (prev["ema20"] <= prev["ema50"] and last["ema20"] > last["ema50"] and 
           last["volume_ratio"] > 1.0):
-        sl = price - atr * 1.5
-        tp = price + atr * 2.0
+        sl = price - atr * 0.8
+        tp = price + atr * 2.5
         base_score = 75
         signal_info = (sl, tp, base_score, "✝️ ЗОЛОТОЙ КРЕСТ", "Быстрая EMA пересекла медленную вверх.")
 
@@ -581,6 +638,9 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
     rr = abs(tp - price) / abs(price - sl) if abs(price - sl) > 0 else 0
     btc_corr = get_btc_correlation(symbol)
     
+    risk_pct = abs(price - sl) / price * 100
+    profit_pct = abs(tp - price) / price * 100
+    
     return {
         "symbol": symbol, "signal": "BUY", "price": price, "tp": tp, "sl": sl,
         "score": score, "rsi": last["rsi"], "volume_ratio": last["volume_ratio"],
@@ -590,10 +650,12 @@ def analyze_symbol(symbol, interval="5", fast_mode=False):
         "events": [],
         "tags": tags,
         "original_sl": sl,
-        "breakeven_done": False
+        "breakeven_done": False,
+        "risk_pct": risk_pct,
+        "profit_pct": profit_pct
     }
 
-def format_signal(s):
+def format_signal(s, price_ok=True, deviation=0):
     stars = "🔥" * min(5, int(s["score"] / 20) + 1)
     corr_line = f"\n📈 Корр. с BTC: {s.get('btc_corr', 0):.2f}" if s.get('btc_corr', 0) > 0.5 else ""
     
@@ -602,15 +664,23 @@ def format_signal(s):
     elif "СКРЫТЫЙ" in s['strategy']: strat_emoji = "🐂"
     elif "КИТ" in s['strategy']: strat_emoji = "🐋"
     elif "КРЕСТ" in s['strategy']: strat_emoji = "✝️"
+    
+    coin_emoji = get_coin_emoji(s['symbol'])
+    sector_emoji = get_sector_emoji(s.get('sector', 'Other'))
         
-    personality = "\n💚 *О, мой старый знакомый!*" if s['symbol'] in FAVORITE_COINS else ("\n💔 *Этот актив вечно меня обманывает.*" if s['symbol'] in HATED_COINS else "")
+    personality = ""
+    if s['symbol'] in FAVORITE_COINS:
+        personality = f"\n💚 *О, {coin_emoji} мой любимчик!*"
+    elif s['symbol'] in HATED_COINS:
+        personality = f"\n💔 *{coin_emoji} вечно меня обманывает.*"
+    
     phrase = get_phrase("signal_found_buy")
     
     fat_signal = ""
     if s['rr'] >= 3.0:
         fat_signal = "\n🔥 **ЖИРНЫЙ СИГНАЛ!** (Риск/Прибыль 1:{:.1f})".format(s['rr'])
     
-    sector_str = f" ({s.get('sector', 'Other')})" if s.get('sector') else ""
+    sector_str = f" {sector_emoji} {s.get('sector', 'Other')}" if s.get('sector') else ""
     
     tags_line = ""
     if s.get('tags'):
@@ -621,10 +691,18 @@ def format_signal(s):
     if spread_val > 0.5:
         spread_warning = f"\n⚠️ Спред: {spread_val:.1f}% — высокий"
     
+    risk_pct = s.get('risk_pct', 0)
+    profit_pct = s.get('profit_pct', 0)
+    
+    if price_ok:
+        entry_line = "✅ Успеваешь войти (отклонение {:.2f}%)".format(deviation)
+    else:
+        entry_line = "⚠️ Цена уходит (отклонение {:.2f}%)".format(deviation)
+    
     return f"""
-{strat_emoji} [ СТРАТЕГИЯ: {s['strategy']} ] {strat_emoji}
+🔔 {strat_emoji} [ СТРАТЕГИЯ: {s['strategy']} ] {strat_emoji}
 **Рынок:** {s['strategy_desc']}
-**Сигнал:** ПОКУПАТЬ {escape_markdown(s['symbol'])}{sector_str} {stars} Score: {s['score']:.0f}/100{fat_signal}
+**Сигнал:** ПОКУПАТЬ {coin_emoji} {escape_markdown(s['symbol'])}{sector_str} {stars} Score: {s['score']:.0f}/100{fat_signal}
 {phrase}
 
 💵 ВХОД: {s['price']:.6f}
@@ -632,7 +710,10 @@ def format_signal(s):
 🛑 СТОП: {s['sl']:.6f}
 
 📊 RSI: {s['rsi']:.1f} | Объём: x{s['volume_ratio']:.2f}
-⚖️ Риск/Прибыль: 1:{s['rr']:.2f}{corr_line}{spread_warning}{tags_line}{personality}
+⚖️ Риск/Прибыль: 1:{s['rr']:.2f}
+💰 Риск: {risk_pct:.1f}% | Прибыль: {profit_pct:.1f}% | Соотношение: 1:{s['rr']:.2f}
+💼 Позиция: 2% от депозита
+{entry_line}{corr_line}{spread_warning}{tags_line}{personality}
 ⏰ {s['time'].strftime('%H:%M:%S')}
 """
 
@@ -699,12 +780,14 @@ async def close_signal(context, sid, s, cur, reason):
         strat_key = None
         if "ПРОБОЙ" in s['strategy']: strat_key = "ПРОБОЙ"
         elif "ОТСКОК" in s['strategy']: strat_key = "ОТСКОК"
+        elif "СКРЫТЫЙ" in s['strategy']: strat_key = "СКРЫТЫЙ"
+        elif "КИТ" in s['strategy']: strat_key = "КИТ"
+        elif "КРЕСТ" in s['strategy']: strat_key = "КРЕСТ"
         if strat_key:
             CONSECUTIVE_LOSSES[strat_key] += 1
-            if CONSECUTIVE_LOSSES[strat_key] == 3:
-                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"💀 **ТРИ УДАРА**\nСтратегия **{strat_key}** дала 3 убытка подряд.\n{get_phrase('tilt_warning')}")
-            elif CONSECUTIVE_LOSSES[strat_key] > 3:
-                CONSECUTIVE_LOSSES[strat_key] = 0
+            total_bad = sum(CONSECUTIVE_LOSSES.values())
+            if total_bad >= 3 and total_bad % 3 == 0:
+                await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"💀 **3 убытка подряд**\n{get_phrase('tilt_warning')}\n⚠️ Следующие сигналы будут с пометкой.")
     else:
         for key in CONSECUTIVE_LOSSES: CONSECUTIVE_LOSSES[key] = 0
 
@@ -731,18 +814,12 @@ async def close_signal(context, sid, s, cur, reason):
     
     now = datetime.now()
     trade_data = {
-        "date": now.strftime("%d.%m.%Y"),
-        "time": now.strftime("%H:%M:%S"),
-        "symbol": s.get("symbol", ""),
-        "sector": s.get("sector", "Other"),
-        "strategy": s.get("strategy", ""),
-        "score": s.get("score", ""),
-        "entry": f"{s.get('price', 0):.6f}",
-        "exit": f"{cur:.6f}",
-        "pnl": f"{pnl:+.2f}%",
-        "reason": display_reason,
-        "rsi": f"{s.get('rsi', 0):.1f}",
-        "volume": f"x{s.get('volume_ratio', 0):.2f}",
+        "date": now.strftime("%d.%m.%Y"), "time": now.strftime("%H:%M:%S"),
+        "symbol": s.get("symbol", ""), "sector": s.get("sector", "Other"),
+        "strategy": s.get("strategy", ""), "score": s.get("score", ""),
+        "entry": f"{s.get('price', 0):.6f}", "exit": f"{cur:.6f}",
+        "pnl": f"{pnl:+.2f}%", "reason": display_reason,
+        "rsi": f"{s.get('rsi', 0):.1f}", "volume": f"x{s.get('volume_ratio', 0):.2f}",
         "rr": f"1:{s.get('rr', 0):.2f}"
     }
     save_trade_to_sheet(trade_data)
@@ -751,8 +828,9 @@ async def close_signal(context, sid, s, cur, reason):
     if is_tp: WEEKLY_STATS["user_wins"] += 1
     WEEKLY_STATS["user_pnl"] += pnl
     
+    coin_emoji = get_coin_emoji(s['symbol'])
     event_log = f"{emoji} **СДЕЛКА ЗАКРЫТА**\n\n"
-    event_log += f"🔮 {escape_markdown(s['symbol'])}\n"
+    event_log += f"🔮 {coin_emoji} {escape_markdown(s['symbol'])}\n"
     event_log += f"📊 Причина: **{display_reason}**\n"
     event_log += f"💵 Вход: ${s['price']:.6f}\n"
     event_log += f"💵 Выход: ${cur:.6f}\n"
@@ -769,40 +847,39 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
         
         try:
             kline = session.get_kline(category="spot", symbol=s["symbol"], interval="1", limit=2)
-            high_1m = None
-            low_1m = None
-            cur = None
-            
             if kline and kline.get("retCode") == 0:
                 candles = kline["result"]["list"]
                 if len(candles) >= 1:
                     high_1m = float(candles[0]["high"])
-                    low_1m = float(candles[0]["low"])
-                    cur = float(candles[0]["close"])
-                    
                     if not tp_touched and high_1m >= s["tp"]:
                         s["tp_touched"] = True
+                        cur = float(candles[0]["close"])
+                        coin_emoji = get_coin_emoji(s['symbol'])
                         await context.bot.send_message(
                             chat_id=TELEGRAM_CHAT_ID,
-                            text=f"🎯 **Цена была у цели!**\n{s['symbol']} коснулся **{s['tp']:.6f}** и отошёл.\nСейчас цена: **{cur:.6f}**\n💡 Закрывай сделку руками или держи дальше.",
+                            text=f"🎯 **Цена была у цели!**\n{coin_emoji} {s['symbol']} коснулся **{s['tp']:.6f}** и отошёл.\nСейчас цена: **{cur:.6f}**\n💡 Закрывай сделку руками или держи дальше.",
                             parse_mode=ParseMode.MARKDOWN
                         )
-                    
-                    if low_1m <= s["sl"]:
-                        reason = "SL"
-                        await close_signal(context, sid, s, cur, reason)
-                        del ACTIVE_SIGNALS[sid]
-                        continue
             
-            if cur is None:
-                resp = session.get_tickers(category="spot", symbol=s["symbol"])
-                if resp.get("retCode") != 0: continue
-                cur = float(resp["result"]["list"][0]["lastPrice"])
-        except:
-            continue
+            resp = session.get_tickers(category="spot", symbol=s["symbol"])
+            if resp.get("retCode") != 0: continue
+            cur = float(resp["result"]["list"][0]["lastPrice"])
+        except: continue
         
         is_sl = cur <= s["sl"] if s["signal"] == "BUY" else cur >= s["sl"]
         is_timeout = datetime.now() - s['time'] > timeout
+        
+        # Проверка близости к SL
+        if not is_sl and not is_timeout and not tp_touched:
+            distance_to_sl = abs(cur - s["sl"]) / s["sl"] * 100
+            if distance_to_sl < 2.0 and not s.get("sl_warning_sent"):
+                s["sl_warning_sent"] = True
+                coin_emoji = get_coin_emoji(s['symbol'])
+                await context.bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=f"⚠️ **Близко к стоп-лоссу!**\n{coin_emoji} {s['symbol']}\nЦена: {cur:.6f} | Стоп: {s['sl']:.6f}\nОсталось: {distance_to_sl:.1f}%",
+                    parse_mode=ParseMode.MARKDOWN
+                )
 
         if is_sl or is_timeout:
             reason = "SL" if is_sl else "TIMEOUT"
@@ -822,9 +899,10 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
                     "message": f"Стоп передвинут на {safe_sl:.4f}",
                     "price": safe_sl
                 })
+                coin_emoji = get_coin_emoji(s['symbol'])
                 await context.bot.send_message(
                     chat_id=TELEGRAM_CHAT_ID,
-                    text=f"🛑 **Передвинь стоп-лосс на {safe_sl:.4f}**\n{s['symbol']} — теперь сделка без убытка."
+                    text=f"🛑 **Передвинь стоп-лосс на {safe_sl:.4f}**\n{coin_emoji} {s['symbol']} — теперь сделка без убытка."
                 )
             
             if progress >= 0.5 and not s.get("partial_done"):
@@ -835,10 +913,75 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE):
                     "message": "Закрой половину, остаток держи",
                     "price": cur
                 })
+                coin_emoji = get_coin_emoji(s['symbol'])
                 await context.bot.send_message(
                     chat_id=TELEGRAM_CHAT_ID,
-                    text=f"✂️ **Закрой половину позиции**\n{s['symbol']} — остаток держи. Стоп уже в безубытке."
+                    text=f"✂️ **Закрой половину позиции**\n{coin_emoji} {s['symbol']} — остаток держи. Стоп уже в безубытке."
                 )
+
+async def get_active_signals_message():
+    if not ACTIVE_SIGNALS:
+        return "🔄 **АКТИВНЫЕ СДЕЛКИ**\n\nНет открытых сделок."
+    
+    msg = f"🔄 **АКТИВНЫЕ СДЕЛКИ ({len(ACTIVE_SIGNALS)})**\n\n"
+    for sid, s in ACTIVE_SIGNALS.items():
+        coin_emoji = get_coin_emoji(s['symbol'])
+        cur = get_current_price(s['symbol'])
+        if cur:
+            pnl = (cur - s['price']) / s['price'] * 100
+            progress = (cur - s['price']) / (s['tp'] - s['price']) * 100 if s['tp'] != s['price'] else 0
+            progress = max(0, min(100, progress))
+            bar = "▓" * int(progress / 10) + "░" * (10 - int(progress / 10))
+            msg += f"{coin_emoji} **{s['symbol']}** | {s['strategy']} | Score {s['score']:.0f}\n"
+            msg += f"💵 Вход: {s['price']:.6f} | Сейчас: {cur:.6f} ({pnl:+.2f}%)\n"
+            msg += f"🛑 Стоп: {s['sl']:.6f} | 🎯 Цель: {s['tp']:.6f}\n"
+            msg += f"📊 [{bar}] {progress:.0f}%\n\n"
+        else:
+            msg += f"{coin_emoji} **{s['symbol']}** | {s['strategy']}\n💵 Вход: {s['price']:.6f}\n🛑 Стоп: {s['sl']:.6f} | 🎯 Цель: {s['tp']:.6f}\n\n"
+    
+    # Любимые и нелюбимые
+    if FAVORITE_COINS:
+        msg += f"💚 **Любимчики:** {', '.join(FAVORITE_COINS[:3])}\n"
+    if HATED_COINS:
+        msg += f"💔 **Предатели:** {', '.join(HATED_COINS[:3])}"
+    
+    return msg
+
+def get_strategy_stats_message():
+    if not HISTORY_FILE.exists():
+        return "📊 **СТАТИСТИКА СТРАТЕГИЙ**\n\nНет данных. Сделки ещё не закрывались."
+    
+    try:
+        with open(HISTORY_FILE, 'r') as f:
+            history = json.load(f)
+    except:
+        return "📊 **СТАТИСТИКА СТРАТЕГИЙ**\n\nОшибка чтения истории."
+    
+    if not history:
+        return "📊 **СТАТИСТИКА СТРАТЕГИЙ**\n\nНет данных."
+    
+    strat_stats = {}
+    for sid, s in history.items():
+        strat = s.get('strategy', 'Неизвестно')
+        pnl = s.get('pnl', 0)
+        if strat not in strat_stats:
+            strat_stats[strat] = {"total": 0, "wins": 0, "losses": 0, "pnl": 0}
+        strat_stats[strat]["total"] += 1
+        strat_stats[strat]["pnl"] += pnl
+        if s.get('status') == 'tp':
+            strat_stats[strat]["wins"] += 1
+        else:
+            strat_stats[strat]["losses"] += 1
+    
+    msg = "📊 **СТАТИСТИКА СТРАТЕГИЙ**\n\n"
+    for strat, stats in sorted(strat_stats.items(), key=lambda x: x[1]["pnl"], reverse=True):
+        wr = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
+        emoji = "🟢" if stats["pnl"] > 0 else "🔴"
+        msg += f"{emoji} **{strat}**\n"
+        msg += f"Сделок: {stats['total']} | Побед: {stats['wins']} | Поражений: {stats['losses']}\n"
+        msg += f"Винрейт: {wr:.0f}% | P&L: {stats['pnl']:+.2f}%\n\n"
+    
+    return msg
 
 async def daily_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().date()
@@ -884,11 +1027,40 @@ async def daily_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     best = max(day_trades, key=lambda x: x.get('pnl', -999))
     worst = min(day_trades, key=lambda x: x.get('pnl', 999))
     
+    # Мини-аналитика
+    streak = 0
+    last_status = None
+    for t in reversed(day_trades):
+        st = "win" if t.get('status') == 'tp' else "loss"
+        if last_status is None:
+            last_status = st
+            streak = 1
+        elif st == last_status:
+            streak += 1
+        else:
+            break
+    
+    streak_text = f"{'✅' if last_status == 'win' else '❌'} {streak} подряд"
+    
+    # Тренд за неделю
+    weekly_trades = []
+    week_ago = today - timedelta(days=7)
+    for sid, s in history.items():
+        if 'closed_time' not in s: continue
+        try:
+            ct = datetime.fromisoformat(s['closed_time']).date()
+            if week_ago <= ct <= today: weekly_trades.append(s)
+        except: continue
+    weekly_pnl = sum(t.get('pnl', 0) for t in weekly_trades)
+    weekly_emoji = "📈" if weekly_pnl > 0 else "📉"
+    
     msg = f"📆 **ИТОГИ ДНЯ** ({today.strftime('%d.%m.%Y')})\n\n"
     msg += f"📊 Сделок: {len(day_trades)}\n✅ Побед: {wins}\n❌ Поражений: {losses}\n"
     if total_be > 0:
         msg += f"🔄 Советов выполнено: {total_be}\n"
-    msg += f"💰 Чистый P&L: {total_pnl:+.2f}%\n\n"
+    msg += f"💰 Чистый P&L: {total_pnl:+.2f}%\n"
+    msg += f"🔄 Серия: {streak_text}\n"
+    msg += f"{weekly_emoji} За неделю: {weekly_pnl:+.2f}%\n\n"
     if best: msg += f"🏆 Лучшая: {best['symbol']} ({best.get('pnl', 0):+.2f}%)\n"
     if worst: msg += f"💀 Худшая: {worst['symbol']} ({worst.get('pnl', 0):+.2f}%)\n\n"
     msg += "💡 Совет: Продолжай вести дневник."
@@ -944,7 +1116,44 @@ async def coin_of_day(context: ContextTypes.DEFAULT_TYPE):
                     best_coin = sym
         if best_coin:
             COIN_OF_DAY = {"symbol": best_coin, "reason": "Объёмы растут, цена стоит. Крупный игрок набирает позицию."}
-            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🎲 **МОНЕТА ДНЯ ОТ ДЕМОНА**\n\nСегодня я бы присмотрелся к **{best_coin}**.\n{COIN_OF_DAY['reason']}\nДеньги любят тишину. Следи за пробоем.")
+            coin_emoji = get_coin_emoji(best_coin)
+            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🎲 **МОНЕТА ДНЯ ОТ ДЕМОНА**\n\nСегодня я бы присмотрелся к {coin_emoji} **{best_coin}**.\n{COIN_OF_DAY['reason']}\nДеньги любят тишину. Следи за пробоем.")
+    except: pass
+
+async def morning_brief(context: ContextTypes.DEFAULT_TYPE):
+    """Утренний разбор рынка в 7:50 МСК"""
+    if SILENT_MODE: return
+    msk = pytz.timezone('Europe/Moscow'); now = datetime.now(msk)
+    if now.hour != 7 or now.minute != 50: return
+    
+    try:
+        market = get_market_summary()
+        top_sec = get_top_sectors()
+        btc_price = get_current_price("BTCUSDT")
+        
+        # Топ-5 движений за ночь
+        data = session.get_tickers(category="spot")
+        if data.get("retCode") == 0:
+            tickers = [(t["symbol"], float(t.get("price24hPcnt", 0)) * 100) for t in data["result"]["list"] if t["symbol"].endswith("USDT")]
+            gainers = sorted(tickers, key=lambda x: x[1], reverse=True)[:3]
+            losers = sorted(tickers, key=lambda x: x[1])[:3]
+        
+        msg = f"🌅 **УТРЕННИЙ РАЗБОР**\n\n"
+        msg += f"{market}\n"
+        if btc_price:
+            msg += f"₿ BTC: **${btc_price:,.0f}**\n\n"
+        if top_sec:
+            msg += f"🔥 **Фавориты:** {', '.join(top_sec)}\n\n"
+        msg += f"📈 **Лидеры роста:**\n"
+        for sym, ch in gainers:
+            coin_emoji = get_coin_emoji(sym)
+            msg += f"{coin_emoji} {sym}: +{ch:.1f}%\n"
+        msg += f"\n📉 **Падение:**\n"
+        for sym, ch in losers:
+            coin_emoji = get_coin_emoji(sym)
+            msg += f"{coin_emoji} {sym}: {ch:.1f}%\n"
+        
+        await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
     except: pass
 
 async def auto_scan_loop(context):
@@ -956,9 +1165,14 @@ async def auto_scan_loop(context):
         for sym in get_top_symbols(15):
             s = analyze_symbol(sym)
             if s:
+                ok, dev = check_price_ok(sym, s['price'])
+                if not ok:
+                    continue
                 key = f"{sym}-BUY"
                 if key in SENT_SIGNALS and datetime.now() - SENT_SIGNALS[key] < timedelta(hours=2): continue
                 SENT_SIGNALS[key] = datetime.now()
+                s['price_ok'] = ok
+                s['deviation'] = dev
                 signals.append(s)
                 if len(signals) >= 3: break
         if signals:
@@ -968,7 +1182,9 @@ async def auto_scan_loop(context):
                 sid = f"{s['symbol']}_{s['time'].strftime('%H%M%S')}"
                 ACTIVE_SIGNALS[sid] = s
                 try:
-                    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=format_signal(s), parse_mode=ParseMode.MARKDOWN)
+                    # Кнопка ДЕТАЛИ
+                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🪙 ДЕТАЛИ", callback_data=f"details_{s['symbol']}")]])
+                    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=format_signal(s, s.get('price_ok', True), s.get('deviation', 0)), parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
                     await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="⏳ Сделка взята на авто-сопровождение. Я буду держать тебя в курсе каждого важного шага.")
                 except Exception as e:
                     await notify_error(context, f"Ошибка отправки сигнала: {e}")
@@ -1015,8 +1231,12 @@ async def full_summary_loop(context):
             for sym in get_top_symbols(15):
                 s = analyze_symbol(sym)
                 if s:
-                    signals.append(s)
-                    if len(signals) >= 3: break
+                    ok, dev = check_price_ok(sym, s['price'])
+                    if ok:
+                        s['price_ok'] = ok
+                        s['deviation'] = dev
+                        signals.append(s)
+                        if len(signals) >= 3: break
             report = f"📊 **АВТО-СВОДКА** ({now.strftime('%H:%M')})\n\n{market}\n\n{clusters if clusters else ''}"
             if top_sec:
                 report += f"\n🔥 **Фавориты:** {', '.join(top_sec)}\n"
@@ -1027,7 +1247,7 @@ async def full_summary_loop(context):
                 for p in pending: report += f"• {p['symbol']}: жду {p['direction']} до ${p['target']:.4f} (осталось {p['time_left']})\n"
             if signals:
                 report += f"\n🟢 **ТОП-{len(signals)} СИГНАЛОВ:**\n"
-                for s in signals: report += f"• {s['symbol']} ({s.get('sector', 'Other')}) | {s['strategy']} | Score {s['score']:.0f} | ${s['price']:.4f} → ${s['tp']:.4f}\n"
+                for s in signals: report += f"• {get_coin_emoji(s['symbol'])} {s['symbol']} ({s.get('sector', 'Other')}) | {s['strategy']} | Score {s['score']:.0f} | ${s['price']:.4f} → ${s['tp']:.4f}\n"
             else: report += f"\n{get_phrase('signal_fail')}"
             await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=report, parse_mode=ParseMode.MARKDOWN)
         except: pass
@@ -1101,14 +1321,14 @@ async def idle_thoughts(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global LAST_USER_INTERACTION; LAST_USER_INTERACTION = datetime.now()
     mood_text = {"excited": "⚡ Я полон энергии!", "neutral": "🧘 Я в равновесии.", "cautious": "⚠️ Я насторожен.", "tired": "😴 Я немного устал."}.get(BOT_MOOD, "")
-    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v32.8\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"🌙 **ДУХИ БЕЗДНЫ** v32.10\n{mood_text}\nСтрогость: {MIN_SCORE}\nТихий: {'🔇' if SILENT_MODE else '🔊'}", reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global MIN_SCORE, SILENT_MODE, LAST_USER_INTERACTION
     LAST_USER_INTERACTION = datetime.now(); text = update.message.text
     if TELEGRAM_CHAT_ID and str(update.effective_chat.id) != TELEGRAM_CHAT_ID:
         await update.message.reply_text("🌫️ Доступ запрещён."); return
-    if text in ["🔥 СИГНАЛЫ", "📊 СВОДКА", "⚡ СКАЛЬП"] and is_sleep_time():
+    if text in ["🔥 СИГНАЛЫ", "📊 СВОДКА", "⚡ СКАЛЬП", "🔄 АКТИВНЫЕ", "📊 СТРАТЕГИИ"] and is_sleep_time():
         await update.message.reply_text(f"🌙 {get_phrase('evening')[0]} До 06:50 я сплю."); return
     try:
         if text == "📊 СВОДКА":
@@ -1121,8 +1341,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for sym in get_top_symbols(15):
                 s = analyze_symbol(sym)
                 if s:
-                    signals.append(s)
-                    if len(signals) >= 3: break
+                    ok, dev = check_price_ok(sym, s['price'])
+                    if ok:
+                        s['price_ok'] = ok
+                        s['deviation'] = dev
+                        signals.append(s)
+                        if len(signals) >= 3: break
             report = f"📊 **СВОДКА**\n\n{market}\n\n{clusters if clusters else ''}"
             if top_sec:
                 report += f"\n🔥 **Фавориты:** {', '.join(top_sec)}\n"
@@ -1133,11 +1357,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for p in pending: report += f"• {p['symbol']}: жду {p['direction']} до ${p['target']:.4f} (осталось {p['time_left']})\n"
             if signals:
                 report += f"\n🟢 **ТОП-{len(signals)} СИГНАЛОВ:**\n"
-                for s in signals: report += f"• {s['symbol']} ({s.get('sector', 'Other')}) | {s['strategy']} | Score {s['score']:.0f} | ${s['price']:.4f} → ${s['tp']:.4f}\n"
+                for s in signals: report += f"• {get_coin_emoji(s['symbol'])} {s['symbol']} ({s.get('sector', 'Other')}) | {s['strategy']} | Score {s['score']:.0f} | ${s['price']:.4f} → ${s['tp']:.4f}\n"
             else: report += f"\n{get_phrase('signal_fail')}"
             await msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
         elif text == "🔥 СИГНАЛЫ": await signal_search(update, context, fast=False)
         elif text == "⚡ СКАЛЬП": await signal_search(update, context, fast=True)
+        elif text == "🔄 АКТИВНЫЕ":
+            msg = await update.message.reply_text("🔄 Проверяю...")
+            report = await get_active_signals_message()
+            await msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
+        elif text == "📊 СТРАТЕГИИ":
+            msg = await update.message.reply_text("📊 Считаю...")
+            report = get_strategy_stats_message()
+            await msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
         elif text == "⚙️ ЕЩЁ": await update.message.reply_text("Выбери:", reply_markup=MORE_KEYBOARD)
         elif text == "📆 ИТОГИ ДНЯ": await daily_summary(update, context)
         elif text == "📰 НОВОСТИ":
@@ -1161,14 +1393,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not history:
                 await update.message.reply_text("🌫️ История пуста.")
                 return
-            recent = list(history.items())[-5:]
-            msg = "🌫️ **ИСТОРИЯ (авто)**\n\n"
+            recent = list(history.items())[-10:]
+            msg = "🌫️ **ИСТОРИЯ (последние 10)**\n\n"
+            # Считаем серию
+            wins_count = sum(1 for _, s in recent if s.get('status') == 'tp')
+            losses_count = len(recent) - wins_count
+            msg += f"📊 Из 10: ✅{wins_count} | ❌{losses_count}\n\n"
             for sid, s in reversed(recent):
                 emoji = "✅" if s.get('status') == 'tp' else ("⏰" if s.get('status') == 'timeout' else "❌")
                 pnl_str = f"{s.get('pnl', 0):+.2f}%"
                 events_count = len(s.get('events', []))
                 events_str = f" (🔄{events_count})" if events_count > 0 else ""
-                msg += f"{emoji} {s['symbol']} | {pnl_str}{events_str}\n"
+                coin_emoji = get_coin_emoji(s.get('symbol', ''))
+                msg += f"{emoji} {coin_emoji} {s['symbol']} | {pnl_str}{events_str}\n"
+            
+            # Тренд
+            if wins_count > losses_count:
+                msg += f"\n📈 **Тренд: положительный** (+{wins_count - losses_count})"
+            elif losses_count > wins_count:
+                msg += f"\n📉 **Тренд: отрицательный** (-{losses_count - wins_count})"
+            else:
+                msg += f"\n📊 **Тренд: нейтральный**"
+            
             await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
         elif text == "⚙️ СТРОГОСТЬ":
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"🟢 50", callback_data="score_50"), InlineKeyboardButton("🟡 60", callback_data="score_60"), InlineKeyboardButton("🔴 70", callback_data="score_70")]])
@@ -1186,10 +1432,15 @@ async def signal_search(update: Update, context: ContextTypes.DEFAULT_TYPE, fast
     for sym in get_top_symbols(25):
         s = analyze_symbol(sym, interval, fast_mode=fast)
         if s:
+            ok, dev = check_price_ok(sym, s['price'])
+            if not ok:
+                continue
             if fast and s['score'] < 45 and len(signals) > 0: continue
             key = f"{sym}-BUY-{interval}"
             if key in SENT_SIGNALS and datetime.now() - SENT_SIGNALS[key] < timedelta(minutes=10 if fast else 120): continue
             SENT_SIGNALS[key] = datetime.now()
+            s['price_ok'] = ok
+            s['deviation'] = dev
             signals.append(s)
             if len(signals) >= 5: break
     if not signals:
@@ -1198,7 +1449,8 @@ async def signal_search(update: Update, context: ContextTypes.DEFAULT_TYPE, fast
     DAILY_STATS["signals_found"] += len(signals)
     for s in signals:
         sid = f"{s['symbol']}_{s['time'].strftime('%H%M%S')}"; ACTIVE_SIGNALS[sid] = s
-        await update.message.reply_text(format_signal(s), parse_mode=ParseMode.MARKDOWN)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🪙 ДЕТАЛИ", callback_data=f"details_{s['symbol']}")]])
+        await update.message.reply_text(format_signal(s, s.get('price_ok', True), s.get('deviation', 0)), parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
         await update.message.reply_text("⏳ Сделка взята на авто-сопровождение. Я буду держать тебя в курсе каждого важного шага.")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1207,21 +1459,56 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d.startswith("score_"):
         MIN_SCORE = int(d.split("_")[1]); settings["MIN_SCORE"] = MIN_SCORE; save_settings(settings)
         await q.edit_message_text(f"✅ Строгость: {MIN_SCORE}")
+    elif d.startswith("details_"):
+        symbol = d.replace("details_", "")
+        s = None
+        for sid, sig in ACTIVE_SIGNALS.items():
+            if sig['symbol'] == symbol:
+                s = sig
+                break
+        
+        if s:
+            coin_emoji = get_coin_emoji(symbol)
+            sector_emoji = get_sector_emoji(s.get('sector', 'Other'))
+            cur = get_current_price(symbol)
+            
+            detail_msg = f"🪙 **ДЕТАЛИ СИГНАЛА**\n\n"
+            detail_msg += f"{coin_emoji} **{symbol}**\n"
+            detail_msg += f"📊 Сектор: {sector_emoji} {s.get('sector', 'Other')}\n"
+            detail_msg += f"🎯 Стратегия: {s.get('strategy', '—')}\n"
+            detail_msg += f"⭐ Score: {s.get('score', 0):.0f}/100\n"
+            detail_msg += f"📈 Корр. с BTC: {s.get('btc_corr', 0):.2f}\n"
+            detail_msg += f"💧 Спред: {get_spread(symbol):.2f}%\n\n"
+            detail_msg += f"💵 Вход: {s['price']:.6f}\n"
+            detail_msg += f"🎯 Цель: {s['tp']:.6f}\n"
+            detail_msg += f"🛑 Стоп: {s['sl']:.6f}\n"
+            if cur:
+                pnl = (cur - s['price']) / s['price'] * 100
+                detail_msg += f"💎 Сейчас: {cur:.6f} ({pnl:+.2f}%)\n"
+            detail_msg += f"\n💼 **Совет по размеру позиции:**\n"
+            detail_msg += f"• Уверен — 3% от депозита\n"
+            detail_msg += f"• Осторожно — 1.5% от депозита\n"
+            detail_msg += f"• Тест — 0.5% от депозита"
+            
+            await q.edit_message_text(detail_msg, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await q.answer("Сигнал уже закрыт", show_alert=True)
 
 def main():
     print("\n" + "="*60)
-    print("🌙 TradeSight Pro WHISPER v32.8 (Автоматон-Болтун)")
+    print("🌙 TradeSight Pro WHISPER v32.10")
     print("="*60)
     if sheet is not None:
         print(f"📊 Google Sheets: лист '{GOOGLE_SHEET_NAME}' готов")
     else:
         print(f"📊 CSV-режим: {TRADES_CSV_FILE}")
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).concurrent_updates(True).job_queue(JobQueue()).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.job_queue.run_repeating(wake_up_message, interval=60, first=10)
-    app.job_queue.run_repeating(coin_of_day, interval=60, first=20)
+    app.job_queue.run_repeating(morning_brief, interval=60, first=20)
+    app.job_queue.run_repeating(coin_of_day, interval=60, first=25)
     app.job_queue.run_repeating(full_summary_loop, interval=300, first=30)
     app.job_queue.run_repeating(auto_scan_loop, interval=300, first=60)
     app.job_queue.run_repeating(emergency_check, interval=300, first=90)
@@ -1231,7 +1518,7 @@ def main():
     app.job_queue.run_repeating(idle_thoughts, interval=3600, first=600)
     app.job_queue.run_repeating(mirror_demon, interval=60, first=240)
     app.job_queue.run_repeating(weekday_heatmap, interval=3600, first=300)
-    print("🌙 Автоматон-Болтун v32.8 запущен.")
+    print("🌙 Автоматон-Болтун v32.10 запущен. Спасибо, братанчик!")
     app.run_polling()
 
 if __name__ == "__main__":
